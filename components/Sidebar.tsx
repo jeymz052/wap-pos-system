@@ -3,7 +3,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { FiMenu, FiX } from "react-icons/fi";
 import {
   FaBoxOpen,
   FaCalculator,
@@ -125,73 +126,99 @@ export default function Sidebar() {
   const pathname = usePathname();
   const activeSection = getActiveSection(pathname);
   const quickActions = quickActionsBySection[activeSection];
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--sidebar-width", "210px");
   }, []);
 
+  // Close menu when route changes
+  useEffect(() => {
+    setIsMobileMenuOpen(false);
+  }, [pathname]);
+
   return (
-    <aside className="sidebar">
-      <div className="sidebar__brand">
-        <Image
-          src="/images/poslogo2.png"
-          alt="WAP POS"
-          width={120}
-          height={80}
-          priority
-          className="sidebar__logo"
+    <>
+      {/* Hamburger button for mobile */}
+      <button 
+        className="sidebar__hamburger"
+        onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+        aria-label="Toggle menu"
+        aria-expanded={isMobileMenuOpen}
+      >
+        {isMobileMenuOpen ? <FiX size={24} /> : <FiMenu size={24} />}
+      </button>
+
+      {/* Mobile overlay */}
+      {isMobileMenuOpen && (
+        <div 
+          className="sidebar__overlay"
+          onClick={() => setIsMobileMenuOpen(false)}
         />
-      </div>
+      )}
 
-      <nav className="sidebar__nav" aria-label="Main navigation">
-        {navItems.map(({ href, label, icon: Icon }) => {
-          const active = pathname === href || pathname.startsWith(`${href}/`);
+      <aside className={`sidebar ${isMobileMenuOpen ? "sidebar--mobile-open" : ""}`}>
+        <div className="sidebar__brand">
+          <Image
+            src="/images/poslogo2.png"
+            alt="WAP POS"
+            width={120}
+            height={80}
+            priority
+            className="sidebar__logo"
+          />
+        </div>
 
-          return (
+        <nav className="sidebar__nav" aria-label="Main navigation">
+          {navItems.map(({ href, label, icon: Icon }) => {
+            const active = pathname === href || pathname.startsWith(`${href}/`);
+
+            return (
+              <Link
+                key={href}
+                href={href}
+                className={`sidebar__item ${active ? "sidebar__item--active" : ""}`}
+              >
+                <span className="sidebar__item-icon">
+                  <Icon size={12} />
+                </span>
+                <span className="sidebar__item-label">{label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar__section-divider" />
+
+        <div className="sidebar__quick-actions">
+          <div className="sidebar__section-title">Quick Actions</div>
+          {quickActions.map(({ id, href, label, icon: Icon, accent, success, muted }) => (
             <Link
-              key={href}
+              key={id}
               href={href}
-              className={`sidebar__item ${active ? "sidebar__item--active" : ""}`}
+              className={`sidebar__quick-action ${accent ? "sidebar__quick-action--accent" : ""} ${success ? "sidebar__quick-action--success" : ""} ${muted ? "sidebar__quick-action--muted" : ""}`}
             >
-              <span className="sidebar__item-icon">
-                <Icon size={12} />
+              <span className="sidebar__item-icon sidebar__item-icon--quick">
+                <Icon size={11} />
               </span>
-              <span className="sidebar__item-label">{label}</span>
+              <span className="sidebar__quick-label">{label}</span>
             </Link>
-          );
-        })}
-      </nav>
+          ))}
+        </div>
 
-      <div className="sidebar__section-divider" />
-
-      <div className="sidebar__quick-actions">
-        <div className="sidebar__section-title">Quick Actions</div>
-        {quickActions.map(({ id, href, label, icon: Icon, accent, success, muted }) => (
-          <Link
-            key={id}
-            href={href}
-            className={`sidebar__quick-action ${accent ? "sidebar__quick-action--accent" : ""} ${success ? "sidebar__quick-action--success" : ""} ${muted ? "sidebar__quick-action--muted" : ""}`}
-          >
-            <span className="sidebar__item-icon sidebar__item-icon--quick">
-              <Icon size={11} />
+        <div className="sidebar__footer">
+          <div className="sidebar__help">
+            <span className="sidebar__help-icon">
+              <FaQuestionCircle size={10} />
             </span>
-            <span className="sidebar__quick-label">{label}</span>
-          </Link>
-        ))}
-      </div>
-
-      <div className="sidebar__footer">
-        <div className="sidebar__help">
-          <span className="sidebar__help-icon">
-            <FaQuestionCircle size={10} />
-          </span>
-          <span>Need Help?</span>
+            <span>Need Help?</span>
+          </div>
+          <div className="sidebar__version">
+            <FaBolt size={9} />
+            <span>WAP POS v1.0.0</span>
+          </div>
         </div>
-        <div className="sidebar__version">
-          <FaBolt size={9} />
-          <span>WAP POS v1.0.0</span>
-        </div>
-      </div>
-    </aside>
+      </aside>
+    </>
   );
 }

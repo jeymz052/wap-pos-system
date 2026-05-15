@@ -2,6 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
+import TopBar from "@/components/TopBar";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -14,7 +15,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-shell">
       <Sidebar />
-      <main className="app-main">{children}</main>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <TopBar title="Dashboard" subtitle="Welcome back, User! Here's what's happening with your business today." />
+        <main className="app-main">{children}</main>
+      </div>
     </div>
   );
 }

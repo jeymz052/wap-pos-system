@@ -1,15 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpRight,
-  Bell,
-  Building2,
-  CalendarDays,
   CheckCircle,
-  ChevronDown,
   DollarSign,
   LayoutDashboard,
   Package,
@@ -180,19 +175,10 @@ function sampleSeries(data: Array<{ name: string; sales: number }>, targetPoints
 const categoryColors = ["#1e40af", "#ef4444", "#22c55e", "#7c3aed", "#f59e0b"];
 
 export default function DashboardPage() {
-  const router = useRouter();
-  const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [branches, setBranches] = useState<BranchOption[]>([]);
   const [selectedBranchId, setSelectedBranchId] = useState<string>("");
   const [headerName, setHeaderName] = useState("User");
   const [headerRole, setHeaderRole] = useState("User");
-  const [headerEmail, setHeaderEmail] = useState("-");
-  const [headerUsername, setHeaderUsername] = useState("User");
-  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
-  const [notificationCount, setNotificationCount] = useState(0);
-  const [todayLabel] = useState(() =>
-    new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date())
-  );
   const [dashboard, setDashboard] = useState<DashboardState>({
     metrics: [
       { label: "Total Sales", value: formatCurrency(0), sub: "+0.0% vs last month", icon: TrendingUp, color: "blue" },
@@ -250,18 +236,6 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    const handleOutsideClick = (event: MouseEvent) => {
-      if (!profileMenuRef.current) return;
-      if (!profileMenuRef.current.contains(event.target as Node)) {
-        setIsProfileMenuOpen(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleOutsideClick);
-    return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, []);
-
-  useEffect(() => {
     if (!selectedBranchId) return;
 
     let isMounted = true;
@@ -283,7 +257,7 @@ export default function DashboardPage() {
             .maybeSingle()
         : Promise.resolve({ data: null });
 
-      const [currentSalesResult, previousSalesResult, currentCustomersResult, previousCustomersResult, activeCustomersResult, inventoryResult, profileResult, unreadNotificationsResult] = await Promise.all([
+      const [currentSalesResult, previousSalesResult, currentCustomersResult, previousCustomersResult, activeCustomersResult, inventoryResult, profileResult] = await Promise.all([
         supabase
           .from("sales")
           .select("id, invoice_number, total_amount, created_at, customer_id")
@@ -318,7 +292,6 @@ export default function DashboardPage() {
           .eq("branch_id", selectedBranchId)
           .order("quantity", { ascending: true }),
         profileByAuthPromise,
-        supabase.from("notifications").select("id", { count: "exact", head: true }).eq("is_read", false),
       ]);
 
       const currentSales = (currentSalesResult.data ?? []) as SaleRow[];
@@ -328,8 +301,6 @@ export default function DashboardPage() {
       const activeCustomers = activeCustomersResult.count ?? 0;
       const inventoryStocks = (inventoryResult.data ?? []) as InventoryRow[];
       const profileUser = (profileResult.data as UserRow | null) ?? null;
-      const unreadNotifications = unreadNotificationsResult.count ?? 0;
-
       console.log("[Dashboard] Profile user:", profileUser?.username || "NULL", "auth_id:", authUser?.id);
       console.log("[Dashboard] profileResult.data:", profileResult.data);
 
@@ -528,9 +499,6 @@ export default function DashboardPage() {
 
       setHeaderName(username);
       setHeaderRole(role);
-      setHeaderEmail(email);
-      setHeaderUsername(username);
-      setNotificationCount(unreadNotifications);
       setDashboard(updatedDashboard);
     };
 
@@ -546,20 +514,6 @@ export default function DashboardPage() {
     };
   }, [selectedBranchId, branches.length]);
 
-  const handleProfileSettings = () => {
-    setIsProfileMenuOpen(false);
-    router.push("/settings");
-  };
-
-  const handleLogout = async () => {
-    setIsProfileMenuOpen(false);
-    await supabase.auth.signOut();
-    router.push("/");
-    router.refresh();
-  };
-
-  const avatarInitials = getInitials(headerName);
-
   return (
     <div className="page dashboard-page">
       <div className="dashboard-header">
@@ -572,83 +526,6 @@ export default function DashboardPage() {
         </div>
 
         <div className="dashboard-header__right">
-          <div className="dashboard-toolbar">
-            <button type="button" className="dashboard-toolbar__control">
-              <CalendarDays size={12} />
-              <span>{todayLabel}</span>
-              <ChevronDown size={12} />
-            </button>
-
-            <label className="dashboard-toolbar__select-wrap">
-              <Building2 size={12} />
-              <select
-                className="dashboard-toolbar__select"
-                value={selectedBranchId}
-                onChange={(event) => setSelectedBranchId(event.target.value)}
-              >
-                {branches.map((branch) => (
-                  <option key={branch.id} value={branch.id}>
-                    {branch.name}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={12} className="dashboard-toolbar__select-icon" />
-            </label>
-
-            <button type="button" className="dashboard-toolbar__notif">
-              <Bell size={16} />
-              <span className="dashboard-toolbar__badge">{notificationCount > 9 ? "9+" : notificationCount}</span>
-            </button>
-
-            <div className="dashboard-toolbar__user-wrap" ref={profileMenuRef}>
-              <button
-                type="button"
-                className="dashboard-toolbar__user"
-                onClick={() => setIsProfileMenuOpen((current) => !current)}
-                aria-haspopup="menu"
-                aria-expanded={isProfileMenuOpen}
-              >
-                <span className="dashboard-toolbar__avatar">{avatarInitials}</span>
-                <span className="dashboard-toolbar__user-text">
-                  <span className="dashboard-toolbar__user-name">{headerUsername}</span>
-                  <span className="dashboard-toolbar__user-role">{headerRole}</span>
-                </span>
-                <ChevronDown size={12} />
-              </button>
-
-              {isProfileMenuOpen && (
-                <div className="dashboard-toolbar__menu" role="menu" aria-label="Profile menu">
-                  <div className="dashboard-toolbar__menu-section">
-                    <span className="dashboard-toolbar__menu-label">Username</span>
-                    <span className="dashboard-toolbar__menu-value">{headerUsername}</span>
-                  </div>
-                  <div className="dashboard-toolbar__menu-section">
-                    <span className="dashboard-toolbar__menu-label">Email</span>
-                    <span className="dashboard-toolbar__menu-value">{headerEmail}</span>
-                  </div>
-                  <div className="dashboard-toolbar__menu-section">
-                    <span className="dashboard-toolbar__menu-label">Role</span>
-                    <span className="dashboard-toolbar__menu-value">{headerRole}</span>
-                  </div>
-
-                  <div className="dashboard-toolbar__menu-actions">
-                    <button type="button" className="dashboard-toolbar__menu-btn" onClick={handleProfileSettings} role="menuitem">
-                      Profile Settings
-                    </button>
-                    <button
-                      type="button"
-                      className="dashboard-toolbar__menu-btn dashboard-toolbar__menu-btn--danger"
-                      onClick={handleLogout}
-                      role="menuitem"
-                    >
-                      Logout
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
           <button type="button" className="dashboard-toolbar__customize">
             <Sparkles size={13} />
             <span>Customize Dashboard</span>
