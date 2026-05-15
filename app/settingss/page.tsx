@@ -1,3 +1,5 @@
+'use client';
+
 import TopBar from "@/components/TopBar";
 import { Settings, Store, Receipt, Package, ShoppingCart, BookOpen, CreditCard, Shield } from "lucide-react";
 const settingGroups = [

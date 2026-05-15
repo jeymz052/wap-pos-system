@@ -1,3 +1,5 @@
+'use client';
+
 import TopBar from "@/components/TopBar";
 import { BarChart2, TrendingUp, Package, DollarSign, FileText } from "lucide-react";
 const reportGroups = [
