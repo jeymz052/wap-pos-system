@@ -1,6 +1,5 @@
 'use client';
 
-import TopBar from "@/components/TopBar";
 import { Settings, Store, Receipt, Package, ShoppingCart, BookOpen, CreditCard, Shield } from "lucide-react";
 const settingGroups = [
   { icon: Settings, label: "General Settings", desc: "Configure basic system settings and preferences", color: "#1e88e5" },
@@ -15,7 +14,6 @@ const settingGroups = [
 export default function SettingsPage() {
   return (
     <div className="page">
-      <TopBar title="Settings" subtitle="Manage system configuration and preferences" />
       <div className="page-body">
         <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}}>
           {settingGroups.map(g=>(

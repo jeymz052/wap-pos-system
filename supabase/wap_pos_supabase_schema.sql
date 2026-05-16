@@ -15,7 +15,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- ============================================================
 
 CREATE TYPE user_role AS ENUM (
-  'super_admin', 'admin', 'manager', 'cashier',
+  'super_admin', 'admin', 'cashier',
   'inventory_staff', 'accountant', 'branch_staff'
 );
 
@@ -1262,11 +1262,10 @@ CREATE TRIGGER trg_return_number
 
 INSERT INTO roles (name, description, is_system) VALUES
   ('Super Admin', 'Full system access', TRUE),
-  ('Admin', 'Manage daily operations', TRUE),
-  ('Manager', 'Branch management and reports', TRUE),
+  ('Admin', 'Manage daily operations, receivables, payables, staff, and reports', TRUE),
   ('Cashier', 'POS checkout only', TRUE),
   ('Inventory Staff', 'Stock management', TRUE),
-  ('Accountant', 'Financial reports', TRUE),
+  ('Accountant', 'Financial reports, expenses, receivables, payables, and cash drawer reports', TRUE),
   ('Branch Staff', 'Limited to assigned branch', TRUE);
 
 INSERT INTO expense_categories (name, description) VALUES

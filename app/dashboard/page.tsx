@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   AlertTriangle,
   ArrowUpRight,
+  CalendarDays,
   CheckCircle,
+  ChevronDown,
   DollarSign,
   LayoutDashboard,
   Package,
@@ -99,14 +101,33 @@ type DashboardMetric = {
   color: "blue" | "purple" | "green" | "orange" | "red";
 };
 
+type DashboardTopSelling = {
+  name: string;
+  qty: string;
+  amount: string;
+  initials: string;
+};
+
+type DashboardTransaction = {
+  invoice: string;
+  customer: string;
+  amount: string;
+};
+
+type DashboardLowStock = {
+  name: string;
+  stock: number;
+  initials: string;
+};
+
 type DashboardState = {
   metrics: DashboardMetric[];
   salesSummary: Array<{ name: string; sales: number }>;
   categorySummary: Array<{ name: string; value: number; amount: number }>;
   comparison: Array<{ name: string; value: number }>;
-  topSelling: Array<{ name: string; qty: string; amount: string }>;
-  recentTransactions: Array<{ invoice: string; customer: string; amount: string }>;
-  lowStock: Array<{ name: string; stock: number }>;
+  topSelling: DashboardTopSelling[];
+  recentTransactions: DashboardTransaction[];
+  lowStock: DashboardLowStock[];
   businessSummary: Array<{ icon: typeof Package; label: string; value: string; color: string }>;
 };
 
@@ -120,7 +141,7 @@ const currencyFormatter = new Intl.NumberFormat("en-PH", {
 const numberFormatter = new Intl.NumberFormat("en-PH");
 
 function formatCurrency(value: number) {
-  return currencyFormatter.format(value).replace("PHP", "₱");
+  return currencyFormatter.format(value).replace("PHP", "\u20b1");
 }
 
 function formatPercent(value: number) {
@@ -150,13 +171,15 @@ function getPreviousMonthRange(referenceDate: Date) {
 }
 
 function getInitials(fullName: string) {
-  return fullName
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("")
-    .slice(0, 2) || "WA";
+  return (
+    fullName
+      .split(" ")
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join("")
+      .slice(0, 2) || "WA"
+  );
 }
 
 function sampleSeries(data: Array<{ name: string; sales: number }>, targetPoints: number) {
@@ -172,13 +195,26 @@ function sampleSeries(data: Array<{ name: string; sales: number }>, targetPoints
   return sampled;
 }
 
-const categoryColors = ["#1e40af", "#ef4444", "#22c55e", "#7c3aed", "#f59e0b"];
+function formatDateLabel(value: Date) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(value);
+}
+
+const categoryColors = ["#2563eb", "#ef4444", "#f97316", "#22c55e", "#7c3aed"];
 
 export default function DashboardPage() {
+  const hasMounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false
+  );
   const [branches, setBranches] = useState<BranchOption[]>([]);
   const [selectedBranchId, setSelectedBranchId] = useState<string>("");
+  const [activeBranchName, setActiveBranchName] = useState("Main Branch");
   const [headerName, setHeaderName] = useState("User");
-  const [headerRole, setHeaderRole] = useState("User");
   const [dashboard, setDashboard] = useState<DashboardState>({
     metrics: [
       { label: "Total Sales", value: formatCurrency(0), sub: "+0.0% vs last month", icon: TrendingUp, color: "blue" },
@@ -197,10 +233,10 @@ export default function DashboardPage() {
     recentTransactions: [],
     lowStock: [],
     businessSummary: [
-      { icon: Package, label: "Total Products", value: "0", color: "#1e88e5" },
+      { icon: Package, label: "Total Products", value: "0", color: "#2563eb" },
       { icon: Users, label: "Active Customers", value: "0", color: "#2563eb" },
       { icon: Truck, label: "Active Suppliers", value: "0", color: "#f59e0b" },
-      { icon: Users, label: "Total Users", value: "0", color: "#7c3aed" },
+      { icon: Users, label: "Total Users", value: "0", color: "#2563eb" },
       { icon: ArrowUpRight, label: "Branches", value: "0", color: "#0f172a" },
       { icon: CheckCircle, label: "System Status", value: "Online", color: "#16a34a" },
     ],
@@ -225,6 +261,7 @@ export default function DashboardPage() {
       if (branchList.length > 0) {
         const mainBranch = branchList.find((branch) => branch.is_main) ?? branchList[0];
         setSelectedBranchId((current) => current || mainBranch.id);
+        setActiveBranchName(mainBranch.name);
       }
     };
 
@@ -243,13 +280,11 @@ export default function DashboardPage() {
     const loadDashboard = async (authUser: { id: string; email?: string } | null | undefined) => {
       if (!authUser) return;
 
-      console.log("[Dashboard] Auth user:", authUser?.email || "NULL");
-
       const now = new Date();
       const currentMonth = getMonthRange(now);
       const previousMonth = getPreviousMonthRange(now);
 
-      const profileByAuthPromise = authUser?.id
+      const profileByAuthPromise = authUser.id
         ? supabase
             .from("users")
             .select("id, first_name, last_name, username, email, role_id, branch_id")
@@ -257,7 +292,17 @@ export default function DashboardPage() {
             .maybeSingle()
         : Promise.resolve({ data: null });
 
-      const [currentSalesResult, previousSalesResult, currentCustomersResult, previousCustomersResult, activeCustomersResult, inventoryResult, profileResult] = await Promise.all([
+      const [
+        currentSalesResult,
+        previousSalesResult,
+        currentCustomersResult,
+        previousCustomersResult,
+        activeCustomersResult,
+        activeSuppliersResult,
+        totalUsersResult,
+        inventoryResult,
+        profileResult,
+      ] = await Promise.all([
         supabase
           .from("sales")
           .select("id, invoice_number, total_amount, created_at, customer_id")
@@ -286,6 +331,8 @@ export default function DashboardPage() {
           .gte("created_at", previousMonth.start.toISOString())
           .lt("created_at", previousMonth.end.toISOString()),
         supabase.from("customers").select("id", { count: "exact", head: true }).eq("is_active", true),
+        supabase.from("suppliers").select("id", { count: "exact", head: true }).eq("is_active", true),
+        supabase.from("users").select("id", { count: "exact", head: true }).eq("is_active", true),
         supabase
           .from("inventory_stocks")
           .select("product_id, quantity")
@@ -299,10 +346,10 @@ export default function DashboardPage() {
       const customersCurrent = currentCustomersResult.count ?? 0;
       const customersPrevious = previousCustomersResult.count ?? 0;
       const activeCustomers = activeCustomersResult.count ?? 0;
+      const activeSuppliers = activeSuppliersResult.count ?? 0;
+      const totalUsers = totalUsersResult.count ?? 0;
       const inventoryStocks = (inventoryResult.data ?? []) as InventoryRow[];
       const profileUser = (profileResult.data as UserRow | null) ?? null;
-      console.log("[Dashboard] Profile user:", profileUser?.username || "NULL", "auth_id:", authUser?.id);
-      console.log("[Dashboard] profileResult.data:", profileResult.data);
 
       const roleName = profileUser?.role_id
         ? await supabase.from("roles").select("name").eq("id", profileUser.role_id).maybeSingle()
@@ -317,10 +364,15 @@ export default function DashboardPage() {
         : { data: [] };
 
       const saleItems = (saleItemsResult.data ?? []) as SaleItemRow[];
-      const productIds = Array.from(new Set([...saleItems.map((item) => item.product_id), ...inventoryStocks.map((item) => item.product_id)]));
+      const productIds = Array.from(
+        new Set([...saleItems.map((item) => item.product_id), ...inventoryStocks.map((item) => item.product_id)])
+      );
 
       const productsResult = productIds.length
-        ? await supabase.from("products").select("id, name, category_id, reorder_level, critical_stock_level").in("id", productIds)
+        ? await supabase
+            .from("products")
+            .select("id, name, category_id, reorder_level, critical_stock_level")
+            .in("id", productIds)
         : { data: [] };
 
       const products = (productsResult.data ?? []) as ProductRow[];
@@ -341,7 +393,7 @@ export default function DashboardPage() {
 
       const salesSummary = sampleSeries(
         Array.from(salesSummaryByDate.entries()).map(([name, sales]) => ({ name, sales })),
-        5
+        7
       );
 
       const currentSalesTotal = currentSales.reduce((sum, sale) => sum + parseNumber(sale.total_amount), 0);
@@ -352,13 +404,10 @@ export default function DashboardPage() {
       }, 0);
       const previousGrossProfit = 0;
 
-      const currentMonthTopCustomers = customersCurrent;
-      const previousMonthTopCustomers = customersPrevious;
-
       const salesGrowth = previousSalesTotal > 0 ? ((currentSalesTotal - previousSalesTotal) / previousSalesTotal) * 100 : 0;
       const ordersGrowth = previousSales.length > 0 ? ((currentSales.length - previousSales.length) / previousSales.length) * 100 : 0;
       const profitGrowth = previousGrossProfit > 0 ? ((saleItemGrossProfit - previousGrossProfit) / previousGrossProfit) * 100 : salesGrowth;
-      const customerGrowth = previousMonthTopCustomers > 0 ? ((currentMonthTopCustomers - previousMonthTopCustomers) / previousMonthTopCustomers) * 100 : 0;
+      const customerGrowth = customersPrevious > 0 ? ((customersCurrent - customersPrevious) / customersPrevious) * 100 : 0;
 
       const topSellingMap = new Map<string, { name: string; qty: number; amount: number }>();
       saleItems.forEach((item) => {
@@ -377,11 +426,10 @@ export default function DashboardPage() {
           name: item.name,
           qty: `${numberFormatter.format(item.qty)} pcs`,
           amount: formatCurrency(item.amount),
+          initials: getInitials(item.name),
         }));
 
-      const recentTransactions = [...currentSales]
-        .slice(-5)
-        .reverse();
+      const recentTransactions = [...currentSales].slice(-5).reverse();
       const customerIds = Array.from(new Set(recentTransactions.map((sale) => sale.customer_id).filter(Boolean))) as string[];
       const customersResult = customerIds.length
         ? await supabase.from("customers").select("id, name").in("id", customerIds)
@@ -403,7 +451,11 @@ export default function DashboardPage() {
         .filter((item) => item.threshold > 0 && item.stock <= item.threshold)
         .sort((a, b) => a.stock - b.stock)
         .slice(0, 5)
-        .map((item) => ({ name: item.name, stock: item.stock }));
+        .map((item) => ({
+          name: item.name,
+          stock: item.stock,
+          initials: getInitials(item.name),
+        }));
 
       const categoryTotals = new Map<string, number>();
       saleItems.forEach((item) => {
@@ -432,10 +484,6 @@ export default function DashboardPage() {
         profileUser,
         roleName: (roleName.data as RoleRow | null)?.name ?? null,
       });
-      const { username, role, email, displayName } = resolvedUser;
-
-      console.log("[Dashboard] Final display - username:", username, "displayName:", displayName, "email:", email, "role:", role);
-      const branchCount = branches.length || 0;
 
       const updatedDashboard: DashboardState = {
         metrics: [
@@ -486,33 +534,48 @@ export default function DashboardPage() {
         })),
         lowStock: lowStockItems,
         businessSummary: [
-          { icon: Package, label: "Total Products", value: numberFormatter.format(products.length), color: "#1e88e5" },
+          { icon: Package, label: "Total Products", value: numberFormatter.format(products.length), color: "#2563eb" },
           { icon: Users, label: "Active Customers", value: numberFormatter.format(activeCustomers), color: "#2563eb" },
-          { icon: Truck, label: "Active Suppliers", value: numberFormatter.format(0), color: "#f59e0b" },
-          { icon: Users, label: "Total Users", value: numberFormatter.format(1), color: "#7c3aed" },
-          { icon: ArrowUpRight, label: "Branches", value: numberFormatter.format(branchCount), color: "#0f172a" },
+          { icon: Truck, label: "Active Suppliers", value: numberFormatter.format(activeSuppliers), color: "#f59e0b" },
+          { icon: Users, label: "Total Users", value: numberFormatter.format(totalUsers), color: "#2563eb" },
+          { icon: ArrowUpRight, label: "Branches", value: numberFormatter.format(branches.length || 0), color: "#0f172a" },
           { icon: CheckCircle, label: "System Status", value: "Online", color: "#16a34a" },
         ],
       };
 
       if (!isMounted) return;
 
-      setHeaderName(username);
-      setHeaderRole(role);
+      setHeaderName(resolvedUser.displayName || resolvedUser.username);
       setDashboard(updatedDashboard);
     };
+
+    const loadInitialDashboard = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (isMounted) {
+        await loadDashboard(user);
+      }
+    };
+
+    void loadInitialDashboard();
 
     const { data } = supabase.auth.onAuthStateChange((event, session) => {
       void loadDashboard(session?.user);
     });
-    
-    const unsubscribe = () => data?.subscription?.unsubscribe();
 
     return () => {
       isMounted = false;
-      unsubscribe?.();
+      data?.subscription?.unsubscribe();
     };
   }, [selectedBranchId, branches.length]);
+
+  const currentMonthSales = dashboard.comparison[0]?.value ?? 0;
+  const previousMonthSales = dashboard.comparison[1]?.value ?? 0;
+  const comparisonDelta = previousMonthSales
+    ? ((currentMonthSales - previousMonthSales) / previousMonthSales) * 100
+    : 0;
 
   return (
     <div className="page dashboard-page">
@@ -522,10 +585,26 @@ export default function DashboardPage() {
             <LayoutDashboard size={18} className="dashboard-header__title-icon" />
             <h1 className="dashboard-header__title">Dashboard Overview</h1>
           </div>
-          <p className="dashboard-header__subtitle">Welcome back, {headerName}! Here&apos;s what&apos;s happening with your business today.</p>
+          <p className="dashboard-header__subtitle">
+            Welcome back, {headerName}! Here&apos;s what&apos;s happening with your business today.
+          </p>
         </div>
 
         <div className="dashboard-header__right">
+          <div className="dashboard-toolbar">
+            <button type="button" className="dashboard-toolbar__control">
+              <CalendarDays size={14} />
+              <span>{formatDateLabel(new Date())}</span>
+              <ChevronDown size={12} />
+            </button>
+
+            <button type="button" className="dashboard-toolbar__control">
+              <Package size={14} />
+              <span>{activeBranchName}</span>
+              <ChevronDown size={12} />
+            </button>
+          </div>
+
           <button type="button" className="dashboard-toolbar__customize">
             <Sparkles size={13} />
             <span>Customize Dashboard</span>
@@ -539,10 +618,10 @@ export default function DashboardPage() {
             <div className={`stat-card__icon stat-card__icon--${metric.color}`}>
               <metric.icon size={20} />
             </div>
-            <div>
+            <div className="dashboard-stat-card__content">
               <div className="stat-card__label">{metric.label}</div>
               <div className="stat-card__value">{metric.value}</div>
-              <div className="stat-card__sub">{metric.sub}</div>
+              <div className={`stat-card__sub ${metric.color === "red" ? "stat-card__sub--alert" : ""}`}>{metric.sub}</div>
             </div>
           </div>
         ))}
@@ -552,89 +631,106 @@ export default function DashboardPage() {
         <section className="table-card dashboard-panel">
           <div className="table-card__header">
             <span className="table-card__title">Sales Summary</span>
-            <span className="dashboard-panel__meta">This Month ▾</span>
+            <span className="dashboard-panel__meta">This Month v</span>
+          </div>
+          <div className="dashboard-panel__headline">
+            <span className="dashboard-panel__headline-value">{formatCurrency(currentMonthSales)}</span>
           </div>
           <div className="dashboard-chart dashboard-chart--line">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={dashboard.salesSummary} margin={{ top: 10, right: 18, left: -10, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
-                <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-                <Line
-                  type="monotone"
-                  dataKey="sales"
-                  stroke="#1e88e5"
-                  strokeWidth={2.5}
-                  dot={{ r: 4, fill: "#1e88e5" }}
-                  activeDot={{ r: 6 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-
-        <section className="table-card dashboard-panel">
-          <div className="table-card__header">
-            <span className="table-card__title">Sales by Category</span>
-            <span className="dashboard-panel__meta">This Month ▾</span>
-          </div>
-          <div className="dashboard-chart dashboard-chart--pie">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={dashboard.categorySummary} cx="50%" cy="50%" innerRadius={48} outerRadius={78} paddingAngle={3} dataKey="amount">
-                  {dashboard.categorySummary.map((entry, index) => (
-                    <Cell key={entry.name} fill={categoryColors[index % categoryColors.length]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="dashboard-pie-legend">
-            {dashboard.categorySummary.length > 0 ? (
-              dashboard.categorySummary.map((item, index) => (
-                <div key={item.name} className="dashboard-pie-legend__item">
-                  <span className="dashboard-pie-legend__dot" style={{ backgroundColor: categoryColors[index % categoryColors.length] }} />
-                  <span>{item.name}</span>
-                  <span>{item.value.toFixed(0)}%</span>
-                </div>
-              ))
+            {hasMounted ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={dashboard.salesSummary} margin={{ top: 10, right: 18, left: -10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                  <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                  <Tooltip formatter={(value) => formatCurrency(Number(value))} />
+                  <Line
+                    type="monotone"
+                    dataKey="sales"
+                    stroke="#2563eb"
+                    strokeWidth={2.5}
+                    dot={{ r: 4, fill: "#2563eb" }}
+                    activeDot={{ r: 6 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
             ) : (
-              <div className="dashboard-empty-note">No category sales found for this month.</div>
+              <div className="dashboard-chart__placeholder" />
             )}
           </div>
         </section>
 
         <section className="table-card dashboard-panel">
           <div className="table-card__header">
+            <span className="table-card__title">Sales by Category</span>
+            <span className="dashboard-panel__meta">This Month v</span>
+          </div>
+          <div className="dashboard-category-layout">
+            <div className="dashboard-chart dashboard-chart--pie">
+              {hasMounted ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={dashboard.categorySummary} cx="50%" cy="50%" innerRadius={48} outerRadius={78} paddingAngle={3} dataKey="amount">
+                      {dashboard.categorySummary.map((entry, index) => (
+                        <Cell key={entry.name} fill={categoryColors[index % categoryColors.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip formatter={(value) => formatCurrency(Number(value))} />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="dashboard-chart__placeholder dashboard-chart__placeholder--round" />
+              )}
+            </div>
+
+            <div className="dashboard-pie-legend">
+              {dashboard.categorySummary.length > 0 ? (
+                dashboard.categorySummary.map((item, index) => (
+                  <div key={item.name} className="dashboard-pie-legend__item">
+                    <span className="dashboard-pie-legend__dot" style={{ backgroundColor: categoryColors[index % categoryColors.length] }} />
+                    <span className="dashboard-pie-legend__name">{item.name}</span>
+                    <span>{item.value.toFixed(0)}%</span>
+                    <span className="dashboard-pie-legend__amount">{formatCurrency(item.amount)}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="dashboard-empty-note">No category sales found for this month.</div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section className="table-card dashboard-panel">
+          <div className="table-card__header">
             <span className="table-card__title">Sales Comparison</span>
-            <span className="dashboard-panel__meta">vs Last Month ▾</span>
+            <span className="dashboard-panel__meta">vs Last Month v</span>
           </div>
           <div className="dashboard-chart dashboard-chart--bar">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart layout="vertical" data={dashboard.comparison} margin={{ top: 10, right: 18, left: 10, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis type="number" hide />
-                <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} width={88} />
-                <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-                <Bar dataKey="value" fill="#1e88e5" radius={[0, 999, 999, 0]} barSize={18} />
-              </BarChart>
-            </ResponsiveContainer>
+            {hasMounted ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart layout="vertical" data={dashboard.comparison} margin={{ top: 10, right: 18, left: 10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                  <XAxis type="number" hide />
+                  <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} width={88} />
+                  <Tooltip formatter={(value) => formatCurrency(Number(value))} />
+                  <Bar dataKey="value" fill="#2563eb" radius={[0, 999, 999, 0]} barSize={18} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="dashboard-chart__placeholder" />
+            )}
           </div>
           <div className="dashboard-comparison">
             <div className="dashboard-comparison__row">
               <span className="dashboard-comparison__label">This Month</span>
-              <span className="dashboard-comparison__value">{formatCurrency(dashboard.comparison[0]?.value ?? 0)}</span>
+              <span className="dashboard-comparison__value">{formatCurrency(currentMonthSales)}</span>
             </div>
             <div className="dashboard-comparison__row dashboard-comparison__row--muted">
               <span className="dashboard-comparison__label">Last Month</span>
-              <span className="dashboard-comparison__value">{formatCurrency(dashboard.comparison[1]?.value ?? 0)}</span>
+              <span className="dashboard-comparison__value">{formatCurrency(previousMonthSales)}</span>
             </div>
             <div className="dashboard-comparison__note">
-              {dashboard.comparison[1]?.value
-                ? `${formatPercent(((dashboard.comparison[0]?.value ?? 0) - (dashboard.comparison[1]?.value ?? 0)) / (dashboard.comparison[1]?.value ?? 1) * 100)} increase in sales`
-                : "No comparison data yet"}
+              {previousMonthSales ? `${formatPercent(comparisonDelta)} increase in sales` : "No comparison data yet"}
             </div>
           </div>
         </section>
@@ -644,14 +740,19 @@ export default function DashboardPage() {
         <section className="table-card dashboard-panel">
           <div className="table-card__header">
             <span className="table-card__title">Top Selling Items</span>
-            <span className="dashboard-panel__meta">This Month ▾</span>
+            <span className="dashboard-panel__meta">This Month v</span>
           </div>
           <table className="dashboard-table">
             <tbody>
               {dashboard.topSelling.map((item, index) => (
                 <tr key={`${item.name}-${index}`}>
                   <td className="dashboard-table__index">{index + 1}</td>
-                  <td className="dashboard-table__item">{item.name}</td>
+                  <td className="dashboard-table__item">
+                    <div className="dashboard-item-cell">
+                      <span className="dashboard-item-cell__avatar">{item.initials}</span>
+                      <span>{item.name}</span>
+                    </div>
+                  </td>
                   <td className="dashboard-table__qty">{item.qty}</td>
                   <td className="dashboard-table__amount">{item.amount}</td>
                 </tr>
@@ -687,7 +788,10 @@ export default function DashboardPage() {
             {dashboard.lowStock.length > 0 ? (
               dashboard.lowStock.map((item) => (
                 <div key={item.name} className="dashboard-low-stock__row">
-                  <div className="dashboard-low-stock__item">{item.name}</div>
+                  <div className="dashboard-low-stock__item">
+                    <span className="dashboard-item-cell__avatar dashboard-item-cell__avatar--alert">{item.initials}</span>
+                    <span>{item.name}</span>
+                  </div>
                   <div className="dashboard-low-stock__badge">Stock: {item.stock}</div>
                 </div>
               ))
@@ -705,13 +809,13 @@ export default function DashboardPage() {
         <div className="dashboard-summary__grid">
           {dashboard.businessSummary.map((item) => (
             <div key={item.label} className="dashboard-summary__item">
-              <div className="dashboard-summary__icon" style={{ backgroundColor: `${item.color}18`, color: item.color }}>
+              <div className="dashboard-summary__icon" style={{ backgroundColor: `${item.color}14`, color: item.color }}>
                 <item.icon size={20} />
               </div>
+              <div className="dashboard-summary__label">{item.label}</div>
               <div className="dashboard-summary__value" style={{ color: item.color }}>
                 {item.value}
               </div>
-              <div className="dashboard-summary__label">{item.label}</div>
             </div>
           ))}
         </div>

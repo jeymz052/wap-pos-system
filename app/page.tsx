@@ -103,33 +103,35 @@ export default function Home() {
         <div className="login-page__hero-copy">
           <h1>Smart POS. Smarter Business.</h1>
           <p className="login-page__lead">
-            Manage sales, inventory, customers and more - all in one powerful system.
+            Manage sales, inventory, customers and more
+            <br />
+            all in one powerful system.
           </p>
 
           <div className="login-page__features">
             <div className="login-page__feature">
-              <span className="login-page__feature-icon"><ShoppingCart size={18} /></span>
+              <span className="login-page__feature-icon"><ShoppingCart size={18} className="login-page__feature-glyph login-page__feature-glyph--cart" /></span>
               <div>
                 <strong>Sales & POS</strong>
                 <span>Fast and secure transactions</span>
               </div>
             </div>
             <div className="login-page__feature">
-              <span className="login-page__feature-icon"><Boxes size={18} /></span>
+              <span className="login-page__feature-icon"><Boxes size={18} className="login-page__feature-glyph login-page__feature-glyph--boxes" /></span>
               <div>
                 <strong>Inventory Management</strong>
                 <span>Track stock in real-time</span>
               </div>
             </div>
             <div className="login-page__feature">
-              <span className="login-page__feature-icon"><UsersRound size={18} /></span>
+              <span className="login-page__feature-icon"><UsersRound size={18} className="login-page__feature-glyph login-page__feature-glyph--users" /></span>
               <div>
                 <strong>Customers & Suppliers</strong>
                 <span>Manage relationships easily</span>
               </div>
             </div>
             <div className="login-page__feature">
-              <span className="login-page__feature-icon"><ChartNoAxesCombined size={18} /></span>
+              <span className="login-page__feature-icon"><ChartNoAxesCombined size={18} className="login-page__feature-glyph login-page__feature-glyph--chart" /></span>
               <div>
                 <strong>Reports & Analytics</strong>
                 <span>Make smarter business decisions</span>
@@ -220,7 +222,7 @@ export default function Home() {
         </div>
 
         <footer className="login-page__footer">
-          <span>© 2024 WAP Motorparts Trading</span>
+          <span>&copy; 2024 WAP Motorparts Trading</span>
           <span>All rights reserved.</span>
         </footer>
       </section>
