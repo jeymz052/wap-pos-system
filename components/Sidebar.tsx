@@ -10,7 +10,7 @@ import {
   FaFileAlt, FaHistory, FaHome, FaMoneyBillWave, FaPlus,
   FaShoppingCart, FaTruck, FaUserCog, FaUsers, FaBolt, FaCog,
   FaBarcode, FaExchangeAlt, FaFileInvoiceDollar,
-  FaFileInvoice, FaBox, FaUserPlus, FaSignOutAlt,
+  FaFileInvoice, FaBox, FaUserPlus, FaSignOutAlt, FaShieldAlt,
 } from "react-icons/fa";
 import { useRbac } from "@/components/RbacProvider";
 import { type Permission } from "@/lib/rbac";
@@ -25,6 +25,7 @@ const NAV_ITEMS: Array<{
   { href: "/dashboard",   label: "Dashboard",    icon: FaHome,          permission: null },
   { href: "/pos",         label: "POS / Sales",  icon: FaShoppingCart,  permission: "pos:view" },
   { href: "/inventory",   label: "Inventory",    icon: FaBoxOpen,       permission: "inventory:view" },
+  { href: "/catalog",     label: "Catalog",      icon: FaBox,           permission: "inventory:view" },
   { href: "/purchasing",  label: "Purchasing",   icon: FaClipboardList, permission: "purchasing:view" },
   { href: "/receivables", label: "Receivables",  icon: FaFileAlt,       permission: "receivables:view" },
   { href: "/payables",    label: "Payables",     icon: FaMoneyBillWave, permission: "payables:view" },
@@ -33,6 +34,7 @@ const NAV_ITEMS: Array<{
   { href: "/reports",     label: "Reports",      icon: FaCalculator,    permission: "reports:view" },
   { href: "/users-roles", label: "Users & Roles",icon: FaUserCog,       permission: "users:view" },
   { href: "/settings",    label: "Settings",     icon: FaCog,           permission: "settings:view" },
+  { href: "/security",    label: "Security",     icon: FaShieldAlt,     permission: null },
 ];
 
 type QuickAction = {
@@ -59,8 +61,14 @@ const QUICK_ACTIONS: Record<string, QuickAction[]> = {
   ],
   inventory: [
     { id: "inventory-item", href: "/inventory", label: "Add New Item", icon: FaPlus, accent: true, permission: "inventory:create" },
+    { id: "inventory-catalog", href: "/catalog", label: "Catalog Setup", icon: FaBox, muted: true, permission: "inventory:view" },
     { id: "inventory-adjust", href: "/inventory", label: "Stock Adjustment", icon: FaExchangeAlt, muted: true, permission: "inventory:adjust_stock" },
     { id: "inventory-barcode", href: "/inventory", label: "Barcode Printing", icon: FaBarcode, muted: true, permission: "inventory:print_barcode" },
+  ],
+  catalog: [
+    { id: "catalog-category", href: "/catalog", label: "Category Manager", icon: FaBox, accent: true, permission: "inventory:view" },
+    { id: "catalog-compatibility", href: "/catalog", label: "Compatibility Map", icon: FaExchangeAlt, muted: true, permission: "inventory:view" },
+    { id: "catalog-products", href: "/inventory", label: "Product Inventory", icon: FaBoxOpen, muted: true, permission: "inventory:view" },
   ],
   purchasing: [
     { id: "purchasing-po", href: "/purchasing", label: "New Purchase Order", icon: FaClipboardList, accent: true, permission: "purchasing:create" },
@@ -106,6 +114,10 @@ const QUICK_ACTIONS: Record<string, QuickAction[]> = {
     { id: "settings-backup", href: "/settings", label: "Backup Data", icon: FaDownload, muted: true, permission: "settings:manage" },
     { id: "settings-users", href: "/users-roles", label: "Users & Roles", icon: FaUserCog, muted: true, permission: "users:view" },
   ],
+  security: [
+    { id: "security-history", href: "/security", label: "Login History", icon: FaHistory, accent: true },
+    { id: "security-password", href: "/security", label: "Change Password", icon: FaShieldAlt, muted: true },
+  ],
 };
 
 function getActiveSection(pathname: string) {
@@ -119,18 +131,22 @@ export default function Sidebar() {
   const { can } = useRbac();
   const activeSection = getActiveSection(pathname);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  // mounted guard — prevents SSR/client HTML mismatch from permission filtering
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--sidebar-width", "156px");
+    setMounted(true);
   }, []);
 
-  const visibleNav = NAV_ITEMS.filter((item) =>
-    item.permission === null || can(item.permission)
-  );
+  // Before mount, show all items (matches SSR output). After mount, apply RBAC filter.
+  const visibleNav = mounted
+    ? NAV_ITEMS.filter((item) => item.permission === null || can(item.permission))
+    : NAV_ITEMS;
 
-  const quickActions = (QUICK_ACTIONS[activeSection] ?? []).filter((qa) =>
-    !qa.permission || can(qa.permission)
-  );
+  const quickActions = mounted
+    ? (QUICK_ACTIONS[activeSection] ?? []).filter((qa) => !qa.permission || can(qa.permission))
+    : (QUICK_ACTIONS[activeSection] ?? []);
 
   async function handleSignOut() {
     await supabase.auth.signOut();

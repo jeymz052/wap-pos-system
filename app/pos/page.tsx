@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useEffect, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   BatteryCharging,
@@ -28,6 +28,15 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { resolveCurrentUserInfo } from "@/lib/current-user";
+import PaymentModal, { type PaymentLine, type PaymentSuccessPayload } from "./components/PaymentModal";
+import ReceiptModal from "./components/ReceiptModal";
+import RecallModal from "./components/RecallModal";
+import VoidModal from "./components/VoidModal";
+import ReturnModal from "./components/ReturnModal";
+import ShiftModal from "./components/ShiftModal";
+import ItemDiscountModal from "./components/ItemDiscountModal";
+import CameraScanModal from "./components/CameraScanModal";
+import { useRbac } from "@/components/RbacProvider";
 
 type BranchOption = {
   id: string;
@@ -45,12 +54,23 @@ type CustomerOption = {
   name: string;
   branch_id?: string | null;
   customer_type?: string | null;
+  email?: string | null;
+  phone?: string | null;
 };
 
 type ProductImageRow = {
   url: string;
   is_primary?: boolean | null;
   sort_order?: number | null;
+};
+
+type CompatibilityModelRow = {
+  id: string;
+  brand: string;
+  model_name: string;
+  engine_type?: string | null;
+  year_from?: number | null;
+  year_to?: number | null;
 };
 
 type InventorySourceRow = {
@@ -74,6 +94,9 @@ type InventorySourceRow = {
       name: string;
     } | null;
     product_images?: ProductImageRow[] | null;
+    product_compatibility?: Array<{
+      motorcycle_model?: CompatibilityModelRow | null;
+    }> | null;
   } | null;
 };
 
@@ -91,6 +114,10 @@ type ProductCard = {
   categoryName: string;
   brandName: string;
   imageUrl: string;
+  compatibleLabels: string[];
+  motorcycleModels: string[];
+  engineTypes: string[];
+  yearModels: string[];
   icon: LucideIcon;
   tint: string;
 };
@@ -137,6 +164,47 @@ type RoleRow = {
 
 type CartItem = ProductCard & {
   quantity: number;
+  overridePrice?: number;
+  itemDiscountType?: string;
+  itemDiscountValue?: number;
+  itemDiscountAmount?: number;
+  approvedByUserId?: string;
+};
+
+type ReceiptState = {
+  saleId: string;
+  invoiceNumber: string;
+  payments: PaymentLine[];
+  amountPaid: number;
+  changeAmount: number;
+  customerName: string;
+  customerEmail?: string | null;
+  customerPhone?: string | null;
+  items: Array<{
+    name: string;
+    sku: string;
+    quantity: number;
+    unitPrice: number;
+    discountAmount: number;
+    totalPrice: number;
+  }>;
+  subtotal: number;
+  discountAmountTotal: number;
+  taxAmount: number;
+  total: number;
+};
+
+type HeldSaleRecall = {
+  id: string;
+  customer_name: string;
+  items: Array<{
+    product_id: string;
+    quantity: number;
+    unit_price?: number;
+    discount_type?: string | null;
+    discount_value?: number | null;
+    discount_amount?: number | null;
+  }>;
 };
 
 type SummaryCard = {
@@ -174,11 +242,13 @@ const paymentMethodMeta: Record<string, { label: string; className: string; icon
   cash: { label: "Cash", className: "pos-pay-chip--cash", icon: Wallet },
   card: { label: "Card", className: "pos-pay-chip--card", icon: CreditCard },
   bank_transfer: { label: "Bank Transfer", className: "pos-pay-chip--other", icon: Wallet },
-  gcash: { label: "GCash", className: "pos-pay-chip--other", icon: Tag },
+  gcash: { label: "QR Ph / GCash", className: "pos-pay-chip--other", icon: Tag },
   ewallet: { label: "E-Wallet", className: "pos-pay-chip--other", icon: Tag },
   customer_credit: { label: "Customer Credit", className: "pos-pay-chip--other", icon: User },
   split: { label: "Split", className: "pos-pay-chip--other", icon: Tag },
 };
+
+const paymentMethodOrder = ["cash", "gcash", "card", "bank_transfer", "customer_credit", "split"];
 
 function parseNumber(value: unknown) {
   if (typeof value === "number") return value;
@@ -219,6 +289,23 @@ function getPrimaryImage(images?: ProductImageRow[] | null) {
   return sorted[0]?.url ?? "";
 }
 
+function formatCompatibilityList(list?: Array<{ motorcycle_model?: CompatibilityModelRow | null }> | null) {
+  if (!list?.length) return [];
+
+  return list
+    .map((entry) => {
+      const model = entry.motorcycle_model;
+      if (!model) return "";
+      const yearRange =
+        model.year_from || model.year_to
+          ? ` ${model.year_from ?? ""}${model.year_to ? `-${model.year_to}` : ""}`.trimEnd()
+          : "";
+      const engineType = model.engine_type ? ` ${model.engine_type}` : "";
+      return `${model.brand} ${model.model_name}${engineType}${yearRange}`.trim();
+    })
+    .filter(Boolean);
+}
+
 function getProductVisual(index: number) {
   return {
     icon: productIcons[index % productIcons.length],
@@ -239,7 +326,33 @@ function getPaymentLabel(methods: string[]) {
   return paymentMethodMeta[methods[0]]?.label ?? methods[0].replace(/_/g, " ");
 }
 
+function getCartUnitPrice(item: CartItem) {
+  return item.overridePrice ?? item.price;
+}
+
+function getCartItemDiscount(item: CartItem) {
+  return item.itemDiscountAmount ?? 0;
+}
+
+function getCartNetUnitPrice(item: CartItem) {
+  return Math.max(0, getCartUnitPrice(item) - getCartItemDiscount(item));
+}
+
+function getCartLineTotal(item: CartItem) {
+  return getCartNetUnitPrice(item) * item.quantity;
+}
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession();
+  const accessToken = data.session?.access_token;
+  return accessToken
+    ? { Authorization: `Bearer ${accessToken}` }
+    : {};
+}
+
 export default function POSPage() {
+  const { canAny } = useRbac();
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [branchOptions, setBranchOptions] = useState<BranchOption[]>([]);
@@ -255,6 +368,9 @@ export default function POSPage() {
   const [selectedCustomerId, setSelectedCustomerId] = useState("walk-in");
   const [salesNote, setSalesNote] = useState("");
   const [discountValue, setDiscountValue] = useState("0");
+  const [selectedMotorcycleFilter, setSelectedMotorcycleFilter] = useState("all");
+  const [selectedEngineFilter, setSelectedEngineFilter] = useState("all");
+  const [selectedYearFilter, setSelectedYearFilter] = useState("");
   const [recentTransactions, setRecentTransactions] = useState<
     Array<{ invoice: string; customer: string; amount: number; payment: string; cashier: string; time: string }>
   >([]);
@@ -265,7 +381,23 @@ export default function POSPage() {
     { label: "Average Sales", value: formatPeso(0), icon: TicketPercent, tone: "orange" },
   ]);
   const [heldSalesCount, setHeldSalesCount] = useState(0);
-  const [availablePaymentMethods, setAvailablePaymentMethods] = useState(["cash", "card", "bank_transfer"]);
+  const [availablePaymentMethods, setAvailablePaymentMethods] = useState(paymentMethodOrder);
+  const [currentShiftId, setCurrentShiftId] = useState<string | null>(null);
+  const [expectedCash, setExpectedCash] = useState(0);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [showReceiptModal, setShowReceiptModal] = useState(false);
+  const [showRecallModal, setShowRecallModal] = useState(false);
+  const [showVoidModal, setShowVoidModal] = useState(false);
+  const [showReturnModal, setShowReturnModal] = useState(false);
+  const [showShiftModal, setShowShiftModal] = useState(false);
+  const [showCameraScanner, setShowCameraScanner] = useState(false);
+  const [editingCartItemId, setEditingCartItemId] = useState<string | null>(null);
+  const [receiptState, setReceiptState] = useState<ReceiptState | null>(null);
+  const [receiptHeader, setReceiptHeader] = useState("WAP Motorparts Trading");
+  const [receiptFooter, setReceiptFooter] = useState("Thank you for your purchase!");
+  const [cashDrawerEnabled, setCashDrawerEnabled] = useState(false);
+  const [cashDrawerUrl, setCashDrawerUrl] = useState("");
 
   const deferredSearchValue = useDeferredValue(searchValue);
 
@@ -362,9 +494,9 @@ export default function POSPage() {
       monthStart.setDate(1);
       monthStart.setHours(0, 0, 0, 0);
 
-      const [categoryResult, customerResult, inventoryResult, salesResult, heldSalesResult, shiftResult] = await Promise.all([
+      const [categoryResult, customerResult, inventoryResult, salesResult, heldSalesResult, shiftResult, settingsResult] = await Promise.all([
         supabase.from("categories").select("id, name").eq("is_active", true).order("sort_order", { ascending: true }),
-        supabase.from("customers").select("id, name, branch_id, customer_type").eq("is_active", true).order("name", { ascending: true }),
+        supabase.from("customers").select("id, name, branch_id, customer_type, email, phone").eq("is_active", true).order("name", { ascending: true }),
         supabase
           .from("inventory_stocks")
           .select(`
@@ -391,6 +523,16 @@ export default function POSPage() {
                 url,
                 is_primary,
                 sort_order
+              ),
+              product_compatibility (
+                motorcycle_model:motorcycle_models (
+                  id,
+                  brand,
+                  model_name,
+                  engine_type,
+                  year_from,
+                  year_to
+                )
               )
             )
           `)
@@ -411,17 +553,22 @@ export default function POSPage() {
         cashierUserId
           ? supabase
               .from("cash_shifts")
-              .select("id")
+              .select("id, expected_cash")
               .eq("branch_id", selectedBranchId)
               .eq("cashier_id", cashierUserId)
               .eq("status", "open")
               .limit(1)
           : Promise.resolve({ data: [], error: null }),
+        supabase
+          .from("settings")
+          .select("key, value")
+          .is("branch_id", null)
+          .in("key", ["pos_receipt_header", "pos_receipt_footer", "pos_cash_drawer_enabled", "pos_cash_drawer_url"]),
       ]);
 
       if (!isMounted) return;
 
-      if (categoryResult.error || customerResult.error || inventoryResult.error || salesResult.error || heldSalesResult.error || shiftResult.error) {
+      if (categoryResult.error || customerResult.error || inventoryResult.error || salesResult.error || heldSalesResult.error || shiftResult.error || settingsResult.error) {
         setError(
           categoryResult.error?.message
           || customerResult.error?.message
@@ -429,6 +576,7 @@ export default function POSPage() {
           || salesResult.error?.message
           || heldSalesResult.error?.message
           || shiftResult.error?.message
+          || settingsResult.error?.message
           || "Unable to load POS data."
         );
         setLoading(false);
@@ -447,6 +595,10 @@ export default function POSPage() {
         .map((row, index) => {
           const product = row.product!;
           const visual = getProductVisual(index);
+          const compatibleLabels = formatCompatibilityList(product.product_compatibility);
+          const compatibilityModels = (product.product_compatibility ?? [])
+            .map((entry) => entry.motorcycle_model)
+            .filter(Boolean) as CompatibilityModelRow[];
 
           return {
             id: product.id,
@@ -462,6 +614,12 @@ export default function POSPage() {
             categoryName: product.category?.name ?? "Others",
             brandName: product.brand?.name ?? "",
             imageUrl: getPrimaryImage(product.product_images),
+            compatibleLabels,
+            motorcycleModels: compatibilityModels.map((model) => `${model.brand} ${model.model_name}`.trim()),
+            engineTypes: compatibilityModels.map((model) => model.engine_type ?? "").filter(Boolean),
+            yearModels: compatibilityModels.flatMap((model) => [model.year_from, model.year_to]
+              .filter((year): year is number => Number.isFinite(year))
+              .map((year) => String(year))),
             icon: visual.icon,
             tint: visual.tint,
           } satisfies ProductCard;
@@ -517,7 +675,7 @@ export default function POSPage() {
       const monthlySalesRows = (monthlySalesResult.data ?? []) as Array<{ total_transactions: number | null; gross_sales: number | string | null }>;
 
       const paymentsBySale = new Map<string, string[]>();
-      const methodSet = new Set<string>(["cash", "card", "bank_transfer"]);
+      const methodSet = new Set<string>(["cash", "gcash", "card", "bank_transfer", "customer_credit", "split"]);
       paymentRows.forEach((payment) => {
         const existing = paymentsBySale.get(payment.sale_id) ?? [];
         existing.push(payment.payment_method);
@@ -557,10 +715,17 @@ export default function POSPage() {
       const grossSales = monthlySalesRows.reduce((sum, row) => sum + parseNumber(row.gross_sales), 0);
       const totalOrders = monthlySalesRows.reduce((sum, row) => sum + (row.total_transactions ?? 0), 0);
       const averageSales = totalOrders > 0 ? grossSales / totalOrders : 0;
+      const settingsMap = new Map(
+        ((settingsResult.data ?? []) as Array<{ key: string; value: string | null }>).map((row) => [row.key, row.value ?? ""])
+      );
 
       setCategories(categoryRows);
       setCustomers(customerRows);
       setProducts(normalizedProducts);
+      setReceiptHeader(settingsMap.get("pos_receipt_header") || "WAP Motorparts Trading");
+      setReceiptFooter(settingsMap.get("pos_receipt_footer") || "Thank you for your purchase!");
+      setCashDrawerEnabled(settingsMap.get("pos_cash_drawer_enabled") === "true");
+      setCashDrawerUrl(settingsMap.get("pos_cash_drawer_url") || "");
       setRecentTransactions(transactions);
       setRecentItems(mappedRecentItems);
       setSummaryCards([
@@ -569,7 +734,9 @@ export default function POSPage() {
         { label: "Average Sales", value: formatPeso(averageSales), icon: TicketPercent, tone: "orange" },
       ]);
       setHeldSalesCount(heldSalesResult.count ?? 0);
-      setAvailablePaymentMethods(Array.from(methodSet));
+      setAvailablePaymentMethods(paymentMethodOrder.filter((method) => methodSet.has(method)));
+      setCurrentShiftId((shiftResult.data?.[0] as { id: string } | undefined)?.id ?? null);
+      setExpectedCash(parseNumber((shiftResult.data?.[0] as { expected_cash?: number | string | null } | undefined)?.expected_cash));
       setLoading(false);
 
       if (!(shiftResult.data ?? []).length) {
@@ -582,17 +749,34 @@ export default function POSPage() {
     return () => {
       isMounted = false;
     };
-  }, [selectedBranchId, cashierUserId, cashierName]);
+  }, [selectedBranchId, cashierUserId, cashierName, refreshToken]);
 
   const categoryTabs = [
     { id: "all", name: "All Items" },
     ...categories.map((category) => ({ id: category.id, name: category.name })),
   ];
 
+  const canApplyDiscount = canAny("pos:apply_discount", "pos:manage");
+  const canOverridePrice = canAny("pos:edit", "pos:manage");
+  const motorcycleFilterOptions = Array.from(new Set(products.flatMap((product) => product.motorcycleModels))).sort();
+  const engineFilterOptions = Array.from(new Set(products.flatMap((product) => product.engineTypes))).sort();
+
   const normalizedQuery = deferredSearchValue.trim().toLowerCase();
   const filteredProducts = products.filter((product) => {
     const matchesCategory = selectedCategoryId === "all" || product.categoryId === selectedCategoryId;
     if (!matchesCategory) return false;
+
+    const matchesMotorcycle = selectedMotorcycleFilter === "all"
+      || product.motorcycleModels.some((value) => value.toLowerCase() === selectedMotorcycleFilter.toLowerCase());
+    if (!matchesMotorcycle) return false;
+
+    const matchesEngine = selectedEngineFilter === "all"
+      || product.engineTypes.some((value) => value.toLowerCase() === selectedEngineFilter.toLowerCase());
+    if (!matchesEngine) return false;
+
+    const yearFilter = selectedYearFilter.trim();
+    const matchesYear = !yearFilter || product.yearModels.includes(yearFilter);
+    if (!matchesYear) return false;
 
     if (!normalizedQuery) return true;
 
@@ -605,20 +789,25 @@ export default function POSPage() {
       product.categoryName,
       product.supplierCode,
       product.shelfLocation,
+      ...product.compatibleLabels,
+      ...product.motorcycleModels,
+      ...product.engineTypes,
+      ...product.yearModels,
     ]
       .join(" ")
       .toLowerCase()
       .includes(normalizedQuery);
   });
 
-  const subtotal = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const discountAmount = Math.min(parseNumber(discountValue), subtotal);
+  const subtotal = cartItems.reduce((sum, item) => sum + getCartLineTotal(item), 0);
+  const discountAmount = canApplyDiscount ? Math.min(parseNumber(discountValue), subtotal) : 0;
   const taxableBase = Math.max(subtotal - discountAmount, 0);
   const tax = taxableBase * 0.12;
   const total = taxableBase + tax;
 
   const selectedBranch = branchOptions.find((branch) => branch.id === selectedBranchId);
   const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId);
+  const editingCartItem = cartItems.find((item) => item.id === editingCartItemId) ?? null;
 
   const addToCart = (product: ProductCard) => {
     setCartItems((current) => {
@@ -643,11 +832,183 @@ export default function POSPage() {
     );
   };
 
+  const applyItemPricing = (
+    productId: string,
+    overridePrice: number | undefined,
+    itemDiscountType: string | undefined,
+    itemDiscountValue: number,
+    itemDiscountAmount: number,
+    approvedByUserId?: string
+  ) => {
+    setCartItems((current) =>
+      current.map((item) =>
+        item.id === productId
+          ? {
+              ...item,
+              overridePrice,
+              itemDiscountType,
+              itemDiscountValue: itemDiscountType ? itemDiscountValue : 0,
+              itemDiscountAmount: itemDiscountType ? itemDiscountAmount : 0,
+              approvedByUserId,
+            }
+          : item
+      )
+    );
+  };
+
+  const handleSearchSubmit = async (rawInput?: string) => {
+    const rawValue = (rawInput ?? searchValue).trim();
+    if (!rawValue) return;
+
+    setError("");
+
+    try {
+      const response = await fetch(`/api/barcodes/resolve?value=${encodeURIComponent(rawValue)}`, {
+        headers: await getAuthHeaders(),
+      });
+      const payload = await response.json();
+
+      if (response.status === 409) {
+        setError("More than one product matched this barcode. Review duplicate mappings in Barcode Studio.");
+        return;
+      }
+
+      if (response.ok && payload.found && payload.productId) {
+        const matchedProduct = products.find((product) => product.id === payload.productId);
+        if (!matchedProduct) {
+          setError("Barcode matched a product that is not stocked in the selected branch.");
+          return;
+        }
+
+        addToCart(matchedProduct);
+        setSearchValue("");
+        return;
+      }
+    } catch {
+      // Fall back to the already-loaded branch product list if the barcode API is unavailable.
+    }
+
+    const localMatch = products.find((product) =>
+      [product.barcode, product.sku, product.partNumber, product.supplierCode]
+        .filter(Boolean)
+        .some((value) => value.trim().toLowerCase() === rawValue.toLowerCase())
+    );
+
+    if (localMatch) {
+      addToCart(localMatch);
+      setSearchValue("");
+      return;
+    }
+
+    setError("No exact barcode, SKU, supplier code, or part number match found.");
+  };
+
   const clearCart = () => {
     setCartItems([]);
     setDiscountValue("0");
     setSelectedCustomerId("walk-in");
     setSalesNote("");
+  };
+
+  const cartPayload = cartItems.map((item) => ({
+    productId: item.id,
+    quantity: item.quantity,
+    unitPrice: getCartUnitPrice(item),
+    discountType: item.itemDiscountType,
+    discountValue: item.itemDiscountValue ?? 0,
+    discountAmount: item.itemDiscountAmount ?? 0,
+    approvedByUserId: item.approvedByUserId,
+    totalPrice: getCartLineTotal(item),
+  }));
+
+  const refreshPosData = () => {
+    setRefreshToken((current) => current + 1);
+  };
+
+  const holdOrder = async () => {
+    if (!cartPayload.length || !selectedBranchId || !cashierUserId) return;
+
+    setError("");
+    const response = await fetch("/api/pos/hold-sale", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        branchId: selectedBranchId,
+        cashierId: cashierUserId,
+        customerId: selectedCustomer?.id ?? null,
+        items: cartPayload,
+        subtotal,
+        discountAmount,
+        taxAmount: tax,
+        totalAmount: total,
+        notes: salesNote,
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      setError(data.error || "Unable to hold this order.");
+      return;
+    }
+
+    clearCart();
+    refreshPosData();
+  };
+
+  const recallHeldSale = async (sale: HeldSaleRecall) => {
+    const productMap = new Map(products.map((product) => [product.id, product]));
+    const recalledItems = sale.items
+      .map((item) => {
+        const product = productMap.get(item.product_id);
+        return product
+          ? {
+              ...product,
+              quantity: item.quantity,
+              overridePrice: item.unit_price !== undefined && Math.abs(item.unit_price - product.price) > 0.009 ? item.unit_price : undefined,
+              itemDiscountType: item.discount_type ?? undefined,
+              itemDiscountValue: item.discount_value ?? 0,
+              itemDiscountAmount: item.discount_amount ?? 0,
+            }
+          : null;
+      })
+      .filter(Boolean) as CartItem[];
+
+    if (!recalledItems.length) return;
+
+    setCartItems(recalledItems);
+    setSelectedCustomerId(customers.find((customer) => customer.name === sale.customer_name)?.id ?? "walk-in");
+    await supabase.from("sale_items").delete().eq("sale_id", sale.id);
+    await supabase.from("sales").delete().eq("id", sale.id);
+    refreshPosData();
+  };
+
+  const handlePaymentSuccess = (payload: PaymentSuccessPayload) => {
+    setReceiptState({
+      saleId: payload.saleId,
+      invoiceNumber: payload.invoiceNumber,
+      payments: payload.payments,
+      amountPaid: payload.amountPaid,
+      changeAmount: payload.changeAmount,
+      customerName: selectedCustomer?.name ?? "Walk-in Customer",
+      customerEmail: selectedCustomer?.email ?? null,
+      customerPhone: selectedCustomer?.phone ?? null,
+      items: cartItems.map((item) => ({
+        name: item.name,
+        sku: item.sku,
+        quantity: item.quantity,
+        unitPrice: getCartUnitPrice(item),
+        discountAmount: (item.itemDiscountAmount ?? 0) * item.quantity,
+        totalPrice: getCartLineTotal(item),
+      })),
+      subtotal,
+      discountAmountTotal: discountAmount,
+      taxAmount: tax,
+      total,
+    });
+    setShowPaymentModal(false);
+    setShowReceiptModal(true);
+    clearCart();
+    refreshPosData();
   };
 
   return (
@@ -680,14 +1041,22 @@ export default function POSPage() {
                 <User size={14} />
                 <span>Cashier: {cashierName}</span>
               </div>
-              <div className="pos-btn pos-btn--warn">
+              <button type="button" className="pos-btn pos-btn--warn" onClick={() => setShowRecallModal(true)}>
                 <Play size={14} />
                 <span>Held Sales: {heldSalesCount}</span>
-              </div>
-              <div className="pos-btn pos-btn--ghost">
+              </button>
+              <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowShiftModal(true)}>
                 <Wallet size={14} />
-                <span>{selectedBranch?.name ?? "Branch"}</span>
-              </div>
+                <span>{currentShiftId ? "Shift Open" : "Open Shift"}</span>
+              </button>
+              <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowVoidModal(true)}>
+                <Trash2 size={14} />
+                <span>Void Sale</span>
+              </button>
+              <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowReturnModal(true)}>
+                <TicketPercent size={14} />
+                <span>Returns</span>
+              </button>
             </div>
           </header>
 
@@ -695,12 +1064,24 @@ export default function POSPage() {
             <div className="pos-search">
               <Search size={16} />
               <input
+                ref={searchInputRef}
                 type="text"
                 value={searchValue}
                 onChange={(event) => setSearchValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void handleSearchSubmit();
+                  }
+                }}
                 placeholder="Scan barcode or search item..."
               />
-              <button type="button" className="pos-search__scan" aria-label="Scan barcode">
+              <button
+                type="button"
+                className="pos-search__scan"
+                aria-label="Scan barcode"
+                onClick={() => setShowCameraScanner(true)}
+              >
                 <ScanLine size={16} />
               </button>
             </div>
@@ -718,6 +1099,27 @@ export default function POSPage() {
               ))}
             </div>
 
+            <div className="pos-tabs" aria-label="Motorparts filters">
+              <select value={selectedMotorcycleFilter} onChange={(event) => setSelectedMotorcycleFilter(event.target.value)}>
+                <option value="all">All Motorcycle Models</option>
+                {motorcycleFilterOptions.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+              <select value={selectedEngineFilter} onChange={(event) => setSelectedEngineFilter(event.target.value)}>
+                <option value="all">All Engine Types</option>
+                {engineFilterOptions.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+              <input
+                type="text"
+                value={selectedYearFilter}
+                onChange={(event) => setSelectedYearFilter(event.target.value)}
+                placeholder="Year model"
+              />
+            </div>
+
             <button
               type="button"
               className="pos-toolbar__trash"
@@ -725,6 +1127,9 @@ export default function POSPage() {
               onClick={() => {
                 setSearchValue("");
                 setSelectedCategoryId("all");
+                setSelectedMotorcycleFilter("all");
+                setSelectedEngineFilter("all");
+                setSelectedYearFilter("");
               }}
             >
               <Trash2 size={15} />
@@ -858,6 +1263,7 @@ export default function POSPage() {
               <div className="pos-cart__table-head">
                 <span>Item</span>
                 <span>Qty</span>
+                <span>Edit</span>
                 <span>Price</span>
                 <span>Amount</span>
               </div>
@@ -878,6 +1284,12 @@ export default function POSPage() {
                         <div>
                           <div className="pos-cart__name">{item.name}</div>
                           <div className="pos-cart__sku">{item.sku}</div>
+                          {(item.overridePrice !== undefined || (item.itemDiscountAmount ?? 0) > 0) ? (
+                            <div className="pos-cart__sku">
+                              {item.overridePrice !== undefined ? `Override ${formatPeso(item.overridePrice)}` : "Base Price"}
+                              {(item.itemDiscountAmount ?? 0) > 0 ? ` · Discount ${formatPeso(item.itemDiscountAmount ?? 0)}` : ""}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
 
@@ -895,8 +1307,17 @@ export default function POSPage() {
                         </button>
                       </div>
 
-                      <div className="pos-cart__price">{formatPeso(item.price)}</div>
-                      <div className="pos-cart__amount">{formatPeso(item.price * item.quantity)}</div>
+                      <button
+                        type="button"
+                        className="pos-btn pos-btn--ghost"
+                        onClick={() => setEditingCartItemId(item.id)}
+                        disabled={!canApplyDiscount && !canOverridePrice}
+                        title={!canApplyDiscount && !canOverridePrice ? "No permission to edit item pricing" : "Adjust item price or discount"}
+                      >
+                        Adjust
+                      </button>
+                      <div className="pos-cart__price">{formatPeso(getCartNetUnitPrice(item))}</div>
+                      <div className="pos-cart__amount">{formatPeso(getCartLineTotal(item))}</div>
                     </div>
                   ))
                 ) : (
@@ -911,8 +1332,16 @@ export default function POSPage() {
                     <button type="button" className="pos-field__prefix">
                       <TicketPercent size={14} />
                     </button>
-                    <input type="number" min="0" step="0.01" value={discountValue} onChange={(event) => setDiscountValue(event.target.value)} />
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={discountValue}
+                      onChange={(event) => setDiscountValue(event.target.value)}
+                      disabled={!canApplyDiscount}
+                    />
                   </div>
+                  {!canApplyDiscount ? <small className="pos-empty-note">Order discount requires POS discount permission.</small> : null}
                 </label>
 
                 <label className="pos-field">
@@ -967,19 +1396,27 @@ export default function POSPage() {
               </div>
 
               <div className="pos-payment-methods">
-                {availablePaymentMethods.slice(0, 3).map((method) => {
+                {availablePaymentMethods.filter((method) => method !== "split").slice(0, 5).map((method) => {
                   const meta = paymentMethodMeta[method] ?? { label: method.replace(/_/g, " "), className: "pos-pay-chip--other", icon: Tag };
                   const Icon = meta.icon;
+                  const isComingSoon = ["card", "bank_transfer", "customer_credit"].includes(method);
                   return (
-                    <button key={method} type="button" className={`pos-pay-chip ${meta.className}`}>
+                    <button key={method} type="button" className={`pos-pay-chip ${meta.className}`} title={isComingSoon ? "Coming soon" : "Available now"}>
                       <Icon size={16} />
-                      <span>{meta.label}</span>
+                      <span>{meta.label}{isComingSoon ? " Soon" : ""}</span>
                     </button>
                   );
                 })}
               </div>
 
-              <button type="button" className="pos-pay-now" disabled={!cartItems.length}>
+              <div className="pos-payment-methods">
+                <button type="button" className="pos-btn pos-btn--ghost" disabled={!cartItems.length} onClick={() => void holdOrder()}>
+                  <Play size={14} />
+                  <span>Hold Order</span>
+                </button>
+              </div>
+
+              <button type="button" className="pos-pay-now" disabled={!cartItems.length} onClick={() => setShowPaymentModal(true)}>
                 <Wallet size={17} />
                 <span>Pay Now (F9)</span>
               </button>
@@ -992,8 +1429,116 @@ export default function POSPage() {
             <div className="pos-mobile-checkout__label">Cart Total</div>
             <div className="pos-mobile-checkout__value">{formatPeso(total)}</div>
           </div>
-          <button type="button" disabled={!cartItems.length}>Checkout</button>
+          <button type="button" disabled={!cartItems.length} onClick={() => setShowPaymentModal(true)}>Checkout</button>
         </div>
+
+        {showPaymentModal ? (
+          <PaymentModal
+            cartItems={cartPayload}
+            subtotal={subtotal}
+            discountAmount={discountAmount}
+            taxAmount={tax}
+            total={total}
+            customerId={selectedCustomer?.id ?? null}
+            customerName={selectedCustomer?.name ?? "Walk-in Customer"}
+            branchId={selectedBranchId}
+            cashierId={cashierUserId}
+            shiftId={currentShiftId}
+            notes={salesNote}
+            onClose={() => setShowPaymentModal(false)}
+            onSuccess={handlePaymentSuccess}
+          />
+        ) : null}
+
+        {showReceiptModal && receiptState ? (
+          <ReceiptModal
+            invoiceNumber={receiptState.invoiceNumber}
+            saleId={receiptState.saleId}
+            branchName={selectedBranch?.name ?? "Branch"}
+            cashierName={cashierName}
+            customerName={receiptState.customerName}
+            customerEmail={receiptState.customerEmail}
+            customerPhone={receiptState.customerPhone}
+            items={receiptState.items}
+            subtotal={receiptState.subtotal}
+            discountAmount={receiptState.discountAmountTotal}
+            taxAmount={receiptState.taxAmount}
+            total={receiptState.total}
+            payments={receiptState.payments}
+            amountPaid={receiptState.amountPaid}
+            changeAmount={receiptState.changeAmount}
+            receiptHeader={receiptHeader}
+            receiptFooter={receiptFooter}
+            cashDrawerEnabled={cashDrawerEnabled}
+            cashDrawerUrl={cashDrawerUrl}
+            onClose={() => {
+              setShowReceiptModal(false);
+              setReceiptState(null);
+            }}
+          />
+        ) : null}
+
+        {showRecallModal ? (
+          <RecallModal
+            branchId={selectedBranchId}
+            onClose={() => setShowRecallModal(false)}
+            onRecall={recallHeldSale}
+          />
+        ) : null}
+
+        {showVoidModal ? (
+          <VoidModal
+            branchId={selectedBranchId}
+            cashierId={cashierUserId}
+            onClose={() => setShowVoidModal(false)}
+            onSuccess={refreshPosData}
+          />
+        ) : null}
+
+        {showReturnModal ? (
+          <ReturnModal
+            branchId={selectedBranchId}
+            cashierId={cashierUserId}
+            onClose={() => setShowReturnModal(false)}
+            onSuccess={refreshPosData}
+          />
+        ) : null}
+
+        {showShiftModal ? (
+          <ShiftModal
+            branchId={selectedBranchId}
+            cashierId={cashierUserId}
+            cashierName={cashierName}
+            currentShiftId={currentShiftId}
+            expectedCash={expectedCash}
+            onClose={() => setShowShiftModal(false)}
+            onSuccess={(shiftId) => {
+              setCurrentShiftId(shiftId);
+              setShowShiftModal(false);
+              refreshPosData();
+            }}
+          />
+        ) : null}
+
+        {editingCartItem ? (
+          <ItemDiscountModal
+            item={editingCartItem}
+            canOverridePrice={canOverridePrice}
+            canApplyDiscount={canApplyDiscount}
+            onClose={() => setEditingCartItemId(null)}
+            onApply={applyItemPricing}
+          />
+        ) : null}
+
+        {showCameraScanner ? (
+          <CameraScanModal
+            onClose={() => setShowCameraScanner(false)}
+            onDetected={(code) => {
+              setSearchValue(code);
+              void handleSearchSubmit(code);
+            }}
+          />
+        ) : null}
       </div>
     </div>
   );

@@ -14,6 +14,7 @@ export interface NavPermission {
 export const ROUTE_PERMISSIONS: Record<string, Permission> = {
   "/pos":         "pos:view",
   "/inventory":   "inventory:view",
+  "/catalog":     "inventory:view",
   "/purchasing":  "purchasing:view",
   "/receivables": "receivables:view",
   "/payables":    "payables:view",
@@ -22,10 +23,11 @@ export const ROUTE_PERMISSIONS: Record<string, Permission> = {
   "/reports":     "reports:view",
   "/users-roles": "users:view",
   "/settings":    "settings:view",
+  // /security is accessible to all authenticated users — no special permission required
 };
 
 // Public routes that don't require auth
-export const PUBLIC_ROUTES = ["/", "/login"];
+export const PUBLIC_ROUTES = ["/", "/login", "/reset-password"];
 
 // Fallback route when user is denied access
 export const DENIED_REDIRECT = "/dashboard";

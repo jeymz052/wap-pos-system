@@ -102,12 +102,6 @@ type SupplierPaymentRow = {
   amount: number | string;
 };
 
-type InventoryStockRow = {
-  id: string;
-  product_id: string;
-  quantity: number;
-};
-
 type UserProfile = {
   id: string;
   branch_id: string | null;
@@ -282,7 +276,17 @@ export default function PurchasingClient() {
   const [attachmentName, setAttachmentName] = useState("");
   const [formItems, setFormItems] = useState<FormItem[]>([]);
   const [receiveInputs, setReceiveInputs] = useState<Record<string, number>>({});
+  const [receiveBatchInputs, setReceiveBatchInputs] = useState<Record<string, string>>({});
+  const [receiveExpiryInputs, setReceiveExpiryInputs] = useState<Record<string, string>>({});
+  const [receiveSerialInputs, setReceiveSerialInputs] = useState<Record<string, string>>({});
+  const [receiveDamagedInputs, setReceiveDamagedInputs] = useState<Record<string, number>>({});
+  const [receiveReturnedInputs, setReceiveReturnedInputs] = useState<Record<string, number>>({});
   const deferredSearch = useDeferredValue(searchTerm);
+
+  async function getAccessToken() {
+    const sessionResult = await supabase.auth.getSession();
+    return sessionResult.data.session?.access_token ?? "";
+  }
 
   async function loadInitialContext() {
     setLoading(true);
@@ -451,6 +455,11 @@ export default function PurchasingClient() {
       setAttachmentName(selectedOrder.invoice_image_url?.replace(/^attachment:/, "") ?? "");
       setFormItems(selectedItems);
       setReceiveInputs(nextReceiveInputs);
+      setReceiveBatchInputs({});
+      setReceiveExpiryInputs({});
+      setReceiveSerialInputs({});
+      setReceiveDamagedInputs({});
+      setReceiveReturnedInputs({});
     });
   }, [selectedOrderId, orders, orderItems]);
 
@@ -465,6 +474,11 @@ export default function PurchasingClient() {
     setCatalogProductId("");
     setFormItems([]);
     setReceiveInputs({});
+    setReceiveBatchInputs({});
+    setReceiveExpiryInputs({});
+    setReceiveSerialInputs({});
+    setReceiveDamagedInputs({});
+    setReceiveReturnedInputs({});
   }
 
   function getProductById(productId: string) {
@@ -755,97 +769,59 @@ export default function PurchasingClient() {
     setSaving(true);
 
     try {
-      const productIds = receiveEntries.map((entry) => entry.item.product_id);
-      const inventoryResult = await supabase
-        .from("inventory_stocks")
-        .select("id, product_id, quantity")
-        .eq("branch_id", selectedOrder.branch_id)
-        .in("product_id", productIds);
+      const token = await getAccessToken();
+      if (!token) {
+        throw new Error("Your session has expired. Please sign in again.");
+      }
 
-      if (inventoryResult.error) throw inventoryResult.error;
-
-      const inventoryMap = new Map(
-        ((inventoryResult.data ?? []) as InventoryStockRow[]).map((row) => [row.product_id, row])
-      );
-
-      await Promise.all(
-        receiveEntries.map(async ({ item, receiveNow }) => {
-          const newReceivedQty = (item.received_qty ?? 0) + receiveNow;
-          const itemUpdateResult = await supabase
-            .from("purchase_order_items")
-            .update({ received_qty: newReceivedQty })
-            .eq("id", item.id);
-
-          if (itemUpdateResult.error) throw itemUpdateResult.error;
-
-          const currentInventory = inventoryMap.get(item.product_id);
-          const quantityBefore = currentInventory?.quantity ?? 0;
-          const quantityAfter = quantityBefore + receiveNow;
-
-          if (currentInventory) {
-            const inventoryUpdateResult = await supabase
-              .from("inventory_stocks")
-              .update({ quantity: quantityAfter })
-              .eq("id", currentInventory.id);
-
-            if (inventoryUpdateResult.error) throw inventoryUpdateResult.error;
-          } else {
-            const inventoryInsertResult = await supabase.from("inventory_stocks").insert({
-              product_id: item.product_id,
-              branch_id: selectedOrder.branch_id,
-              quantity: quantityAfter,
-            });
-
-            if (inventoryInsertResult.error) throw inventoryInsertResult.error;
-          }
-
-          const movementResult = await supabase.from("stock_movements").insert({
-            product_id: item.product_id,
-            branch_id: selectedOrder.branch_id,
-            movement_type: "purchase",
+      const response = await fetch("/api/inventory/receive-stock", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purchaseOrderId: selectedOrder.id,
+          branchId: selectedOrder.branch_id,
+          supplierInvoice,
+          invoiceImageUrl: attachmentName ? `attachment:${attachmentName}` : selectedOrder.invoice_image_url,
+          notes: referenceNote,
+          entries: receiveEntries.map(({ item, receiveNow }) => ({
+            poItemId: item.id,
+            productId: item.product_id,
             quantity: receiveNow,
-            quantity_before: quantityBefore,
-            quantity_after: quantityAfter,
-            reference_type: "purchase_order",
-            reference_id: selectedOrder.id,
-            notes: `Received via ${selectedOrder.po_number}`,
-            created_by: profileUserId || null,
-          });
+            batchNumber: receiveBatchInputs[item.id] ?? "",
+            expiryDate: receiveExpiryInputs[item.id] ?? "",
+            serialNumbers: (receiveSerialInputs[item.id] ?? "")
+              .split(/\r?\n|,/)
+              .map((value) => value.trim())
+              .filter(Boolean),
+            damagedQuantity: Math.max(0, Number(receiveDamagedInputs[item.id] ?? 0)),
+            returnedQuantity: Math.max(0, Number(receiveReturnedInputs[item.id] ?? 0)),
+            notes: item.notes || referenceNote,
+          })),
+        }),
+      });
 
-          if (movementResult.error) throw movementResult.error;
-        })
-      );
-
-      const updatedItems = selectedItems.map((item) => ({
-        ...item,
-        received_qty: (item.received_qty ?? 0) + Math.max(0, Number(receiveInputs[item.id] ?? 0)),
-      }));
-
-      const isFullyReceived = updatedItems.every((item) => (item.received_qty ?? 0) >= item.quantity);
-      const status = isFullyReceived ? "fully_received" : "partially_received";
-
-      const orderUpdateResult = await supabase
-        .from("purchase_orders")
-        .update({
-          status,
-          received_date: new Date().toISOString().slice(0, 10),
-          supplier_invoice: supplierInvoice.trim() || null,
-          invoice_image_url: attachmentName ? `attachment:${attachmentName}` : selectedOrder.invoice_image_url,
-          notes: referenceNote.trim() || null,
-        })
-        .eq("id", selectedOrder.id);
-
-      if (orderUpdateResult.error) throw orderUpdateResult.error;
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "Unable to record receiving.");
+      }
 
       await loadPurchasingData(selectedBranchId);
       setReceiveInputs({});
+      setReceiveBatchInputs({});
+      setReceiveExpiryInputs({});
+      setReceiveSerialInputs({});
+      setReceiveDamagedInputs({});
+      setReceiveReturnedInputs({});
       setFormMessage({
         type: "success",
-        text: isFullyReceived ? "Stock fully received and inventory updated." : "Partial receiving recorded and inventory updated.",
+        text: result.status === "fully_received" ? "Stock fully received and inventory updated." : "Partial receiving recorded and inventory updated.",
       });
     } catch (error) {
       console.error("[Purchasing] recordReceiving failed:", error);
-      setFormMessage({ type: "error", text: "Unable to record receiving. Please try again." });
+      setFormMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to record receiving. Please try again." });
     } finally {
       setSaving(false);
     }
@@ -1282,6 +1258,75 @@ export default function PurchasingClient() {
                         <div>
                           <strong>{product?.name ?? "Select product"}</strong>
                           <span>{product?.sku ?? "-"}</span>
+                          {selectedOrder && canReceive && item.poItemId ? (
+                            <div className="po-item-receiving-meta">
+                              <input
+                                type="text"
+                                className="purchasing-field-control purchasing-field-control--compact"
+                                placeholder="Batch number"
+                                value={receiveBatchInputs[item.poItemId] ?? ""}
+                                onChange={(event) =>
+                                  setReceiveBatchInputs((current) => ({
+                                    ...current,
+                                    [item.poItemId ?? ""]: event.target.value,
+                                  }))
+                                }
+                                disabled={saving}
+                              />
+                              <input
+                                type="date"
+                                className="purchasing-field-control purchasing-field-control--compact"
+                                value={receiveExpiryInputs[item.poItemId] ?? ""}
+                                onChange={(event) =>
+                                  setReceiveExpiryInputs((current) => ({
+                                    ...current,
+                                    [item.poItemId ?? ""]: event.target.value,
+                                  }))
+                                }
+                                disabled={saving}
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                className="purchasing-field-control purchasing-field-control--compact"
+                                placeholder="Damaged"
+                                value={receiveDamagedInputs[item.poItemId] ?? 0}
+                                onChange={(event) =>
+                                  setReceiveDamagedInputs((current) => ({
+                                    ...current,
+                                    [item.poItemId ?? ""]: Math.max(0, Number(event.target.value) || 0),
+                                  }))
+                                }
+                                disabled={saving}
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                className="purchasing-field-control purchasing-field-control--compact"
+                                placeholder="Returned"
+                                value={receiveReturnedInputs[item.poItemId] ?? 0}
+                                onChange={(event) =>
+                                  setReceiveReturnedInputs((current) => ({
+                                    ...current,
+                                    [item.poItemId ?? ""]: Math.max(0, Number(event.target.value) || 0),
+                                  }))
+                                }
+                                disabled={saving}
+                              />
+                              <textarea
+                                className="purchasing-note-control purchasing-note-control--compact"
+                                placeholder="Serial numbers, one per line or comma-separated"
+                                value={receiveSerialInputs[item.poItemId] ?? ""}
+                                onChange={(event) =>
+                                  setReceiveSerialInputs((current) => ({
+                                    ...current,
+                                    [item.poItemId ?? ""]: event.target.value,
+                                  }))
+                                }
+                                disabled={saving}
+                              />
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                       <input

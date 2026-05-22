@@ -70,6 +70,9 @@ CREATE TYPE invoice_status AS ENUM (
 );
 
 CREATE TYPE barcode_type AS ENUM ('barcode', 'qr_code');
+CREATE TYPE barcode_source_type AS ENUM ('primary', 'sku', 'supplier', 'alias', 'qr');
+CREATE TYPE stock_count_status AS ENUM ('draft', 'posted', 'cancelled');
+CREATE TYPE serial_tracking_status AS ENUM ('available', 'sold', 'returned', 'damaged', 'transferred');
 
 -- ============================================================
 -- MODULE 1: BRANCHES
@@ -201,10 +204,22 @@ CREATE TABLE brands (
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE engine_types (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name             TEXT NOT NULL UNIQUE,
+  code             TEXT UNIQUE,
+  description      TEXT,
+  displacement_cc  INT,
+  cooling_type     TEXT,
+  is_active        BOOLEAN DEFAULT TRUE,
+  created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE motorcycle_models (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   brand       TEXT NOT NULL,
   model_name  TEXT NOT NULL,
+  engine_type_id UUID REFERENCES engine_types(id),
   engine_type TEXT,
   year_from   INT,
   year_to     INT,
@@ -271,6 +286,15 @@ CREATE TABLE customer_vehicles (
 -- MODULE 7: PRODUCTS & INVENTORY
 -- ============================================================
 
+CREATE TABLE product_groups (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name        TEXT NOT NULL UNIQUE,
+  code        TEXT UNIQUE,
+  description TEXT,
+  is_active   BOOLEAN DEFAULT TRUE,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE products (
   id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   name                  TEXT NOT NULL,
@@ -279,6 +303,7 @@ CREATE TABLE products (
   barcode               TEXT UNIQUE,
   category_id           UUID REFERENCES categories(id),
   brand_id              UUID REFERENCES brands(id),
+  product_group_id      UUID REFERENCES product_groups(id),
   supplier_id           UUID REFERENCES suppliers(id),
   supplier_code         TEXT,
   unit_type             TEXT DEFAULT 'pcs',
@@ -316,6 +341,32 @@ CREATE TABLE product_compatibility (
   UNIQUE (product_id, motorcycle_model_id)
 );
 
+CREATE TABLE product_variants (
+  id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  product_id        UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  variant_name      TEXT NOT NULL,
+  variant_value     TEXT NOT NULL,
+  sku               TEXT UNIQUE,
+  barcode           TEXT UNIQUE,
+  additional_cost   NUMERIC(12, 2) DEFAULT 0,
+  additional_price  NUMERIC(12, 2) DEFAULT 0,
+  additional_wholesale_price NUMERIC(12, 2) DEFAULT 0,
+  minimum_price     NUMERIC(12, 2),
+  is_active         BOOLEAN DEFAULT TRUE,
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (product_id, variant_name, variant_value)
+);
+
+CREATE TABLE product_variant_stocks (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  variant_id  UUID NOT NULL REFERENCES product_variants(id) ON DELETE CASCADE,
+  branch_id   UUID NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+  quantity    INT NOT NULL DEFAULT 0,
+  updated_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (variant_id, branch_id)
+);
+
 CREATE TABLE inventory_stocks (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   product_id   UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
@@ -323,6 +374,40 @@ CREATE TABLE inventory_stocks (
   quantity     INT NOT NULL DEFAULT 0,
   updated_at   TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (product_id, branch_id)
+);
+
+CREATE TABLE inventory_batches (
+  id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  product_id        UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  branch_id         UUID NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+  batch_number      TEXT NOT NULL,
+  quantity_received INT NOT NULL DEFAULT 0,
+  quantity_on_hand  INT NOT NULL DEFAULT 0,
+  cost_price        NUMERIC(12, 2),
+  expiry_date       DATE,
+  supplier_id       UUID REFERENCES suppliers(id),
+  reference_type    TEXT,
+  reference_id      UUID,
+  notes             TEXT,
+  created_by        UUID REFERENCES users(id),
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (product_id, branch_id, batch_number)
+);
+
+CREATE TABLE inventory_serial_numbers (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  product_id      UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  branch_id       UUID NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+  serial_number   TEXT NOT NULL UNIQUE,
+  status          serial_tracking_status DEFAULT 'available',
+  batch_id        UUID REFERENCES inventory_batches(id) ON DELETE SET NULL,
+  reference_type  TEXT,
+  reference_id    UUID,
+  notes           TEXT,
+  created_by      UUID REFERENCES users(id),
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE stock_movements (
@@ -383,21 +468,63 @@ CREATE TABLE stock_adjustment_items (
   notes                TEXT
 );
 
+CREATE TABLE stock_counts (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  branch_id   UUID NOT NULL REFERENCES branches(id),
+  status      stock_count_status DEFAULT 'draft',
+  notes       TEXT,
+  counted_by  UUID REFERENCES users(id),
+  approved_by UUID REFERENCES users(id),
+  counted_at  TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE stock_count_items (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  stock_count_id   UUID NOT NULL REFERENCES stock_counts(id) ON DELETE CASCADE,
+  product_id       UUID NOT NULL REFERENCES products(id),
+  system_quantity  INT NOT NULL,
+  counted_quantity INT NOT NULL,
+  variance         INT GENERATED ALWAYS AS (counted_quantity - system_quantity) STORED,
+  notes            TEXT
+);
+
 -- ============================================================
 -- MODULE 8: BARCODES & LABELS
 -- ============================================================
 
+CREATE TABLE product_barcodes (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  product_id       UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  barcode_value    TEXT NOT NULL,
+  normalized_value TEXT NOT NULL UNIQUE,
+  barcode_type     barcode_type DEFAULT 'barcode',
+  source_type      barcode_source_type DEFAULT 'alias',
+  is_primary       BOOLEAN DEFAULT FALSE,
+  supplier_name    TEXT,
+  notes            TEXT,
+  created_by       UUID REFERENCES users(id),
+  created_at       TIMESTAMPTZ DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE barcode_labels (
-  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  product_id    UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-  barcode_value TEXT NOT NULL,
-  barcode_type  barcode_type DEFAULT 'barcode',
-  label_size    TEXT DEFAULT '58x30', -- e.g. "58x30", "100x50"
-  include_price BOOLEAN DEFAULT TRUE,
-  include_brand BOOLEAN DEFAULT TRUE,
-  include_sku   BOOLEAN DEFAULT TRUE,
-  created_by    UUID REFERENCES users(id),
-  created_at    TIMESTAMPTZ DEFAULT NOW()
+  id                   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  product_id           UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  barcode_value        TEXT NOT NULL,
+  barcode_type         barcode_type DEFAULT 'barcode',
+  label_size           TEXT DEFAULT '58x30', -- e.g. "58x30", "100x50"
+  width_mm             NUMERIC(8, 2) DEFAULT 58,
+  height_mm            NUMERIC(8, 2) DEFAULT 30,
+  print_quantity       INT DEFAULT 1,
+  include_price        BOOLEAN DEFAULT TRUE,
+  include_brand        BOOLEAN DEFAULT TRUE,
+  include_sku          BOOLEAN DEFAULT TRUE,
+  include_product_name BOOLEAN DEFAULT TRUE,
+  include_shelf_location BOOLEAN DEFAULT TRUE,
+  created_by           UUID REFERENCES users(id),
+  created_at           TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ============================================================
@@ -735,12 +862,21 @@ CREATE INDEX idx_products_category_id ON products(category_id);
 CREATE INDEX idx_products_brand_id ON products(brand_id);
 CREATE INDEX idx_products_supplier_id ON products(supplier_id);
 CREATE INDEX idx_products_status ON products(status);
+CREATE INDEX idx_product_barcodes_product_id ON product_barcodes(product_id);
+CREATE INDEX idx_product_barcodes_normalized_value ON product_barcodes(normalized_value);
+CREATE INDEX idx_barcode_labels_product_id ON barcode_labels(product_id);
+CREATE INDEX idx_product_variants_product_id ON product_variants(product_id);
+CREATE INDEX idx_product_variant_stocks_variant_branch ON product_variant_stocks(variant_id, branch_id);
 
 -- Inventory
 CREATE INDEX idx_inventory_stocks_product_branch ON inventory_stocks(product_id, branch_id);
 CREATE INDEX idx_stock_movements_product ON stock_movements(product_id);
 CREATE INDEX idx_stock_movements_branch ON stock_movements(branch_id);
 CREATE INDEX idx_stock_movements_created_at ON stock_movements(created_at);
+CREATE INDEX idx_inventory_batches_product_branch ON inventory_batches(product_id, branch_id);
+CREATE INDEX idx_inventory_batches_expiry_date ON inventory_batches(expiry_date);
+CREATE INDEX idx_inventory_serial_numbers_product_branch ON inventory_serial_numbers(product_id, branch_id);
+CREATE INDEX idx_stock_counts_branch_id ON stock_counts(branch_id);
 
 -- Sales
 CREATE INDEX idx_sales_branch_id ON sales(branch_id);
@@ -787,8 +923,20 @@ CREATE INDEX idx_cash_shifts_status ON cash_shifts(status);
 
 ALTER TABLE branches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE brands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE engine_types ENABLE ROW LEVEL SECURITY;
+ALTER TABLE motorcycle_models ENABLE ROW LEVEL SECURITY;
 ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_compatibility ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_variants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_variant_stocks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_barcodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE barcode_labels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inventory_stocks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventory_batches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inventory_serial_numbers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sales ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sale_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sale_payments ENABLE ROW LEVEL SECURITY;
@@ -801,6 +949,7 @@ ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cash_shifts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE stock_movements ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stock_counts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE returns ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
@@ -1127,6 +1276,41 @@ LEFT JOIN brands b ON p.brand_id = b.id
 JOIN branches br ON s.branch_id = br.id
 WHERE p.status = 'active';
 
+CREATE OR REPLACE VIEW v_inventory_valuation AS
+SELECT
+  s.branch_id,
+  br.name AS branch_name,
+  p.id AS product_id,
+  p.name AS product_name,
+  p.sku,
+  s.quantity,
+  p.cost_price,
+  p.selling_price,
+  (s.quantity * p.cost_price) AS total_cost_value,
+  (s.quantity * p.selling_price) AS total_retail_value
+FROM inventory_stocks s
+JOIN products p ON s.product_id = p.id
+JOIN branches br ON s.branch_id = br.id;
+
+CREATE OR REPLACE VIEW v_expiring_inventory_batches AS
+SELECT
+  b.id,
+  b.product_id,
+  p.name AS product_name,
+  p.sku,
+  b.branch_id,
+  br.name AS branch_name,
+  b.batch_number,
+  b.quantity_received,
+  b.quantity_on_hand,
+  b.expiry_date,
+  b.created_at
+FROM inventory_batches b
+JOIN products p ON b.product_id = p.id
+JOIN branches br ON b.branch_id = br.id
+WHERE b.expiry_date IS NOT NULL
+  AND b.quantity_on_hand > 0;
+
 -- Daily sales summary
 CREATE OR REPLACE VIEW v_daily_sales_summary AS
 SELECT
@@ -1188,6 +1372,26 @@ CREATE TRIGGER trg_products_updated_at
   BEFORE UPDATE ON products
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
+CREATE TRIGGER trg_product_variants_updated_at
+  BEFORE UPDATE ON product_variants
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER trg_product_variant_stocks_updated_at
+  BEFORE UPDATE ON product_variant_stocks
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER trg_inventory_batches_updated_at
+  BEFORE UPDATE ON inventory_batches
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER trg_inventory_serial_numbers_updated_at
+  BEFORE UPDATE ON inventory_serial_numbers
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER trg_product_barcodes_updated_at
+  BEFORE UPDATE ON product_barcodes
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
 CREATE TRIGGER trg_sales_updated_at
   BEFORE UPDATE ON sales
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
@@ -1206,6 +1410,10 @@ CREATE TRIGGER trg_suppliers_updated_at
 
 CREATE TRIGGER trg_returns_updated_at
   BEFORE UPDATE ON returns
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER trg_stock_counts_updated_at
+  BEFORE UPDATE ON stock_counts
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- Auto-generate PO number
@@ -1277,6 +1485,49 @@ INSERT INTO expense_categories (name, description) VALUES
   ('Maintenance', 'Equipment and shop maintenance'),
   ('Marketing', 'Advertising and promotions'),
   ('Others', 'Miscellaneous expenses');
+
+INSERT INTO categories (name, parent_id, sort_order, is_active)
+SELECT seed.name, NULL, seed.sort_order, TRUE
+FROM (
+  VALUES
+    ('Engine Parts', 10),
+    ('Brake System', 20),
+    ('Tires & Tubes', 30),
+    ('Electrical Parts', 40),
+    ('Lights & Signal', 50),
+    ('Chains & Sprockets', 60),
+    ('Oils & Lubricants', 70),
+    ('Body Parts', 80),
+    ('Accessories', 90),
+    ('Tools', 100),
+    ('Batteries', 110),
+    ('Cables', 120),
+    ('Bearings', 130),
+    ('Suspension Parts', 140)
+) AS seed(name, sort_order)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM categories existing
+  WHERE existing.parent_id IS NULL
+    AND LOWER(existing.name) = LOWER(seed.name)
+);
+
+INSERT INTO engine_types (name, code, description, displacement_cc, cooling_type)
+SELECT *
+FROM (
+  VALUES
+    ('2-Stroke', '2T', 'Traditional 2-stroke engine applications', NULL, NULL),
+    ('4-Stroke', '4T', 'Traditional 4-stroke engine applications', NULL, NULL),
+    ('Single Cylinder', '1CYL', 'Single-cylinder motorcycle engines', NULL, NULL),
+    ('Parallel Twin', 'PTWIN', 'Parallel twin-cylinder engines', NULL, NULL),
+    ('Liquid Cooled', 'LIQ', 'Liquid cooled engines and model variants', NULL, 'liquid'),
+    ('Air Cooled', 'AIR', 'Air cooled engines and model variants', NULL, 'air')
+) AS seed(name, code, description, displacement_cc, cooling_type)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM engine_types existing
+  WHERE existing.name = seed.name
+);
 
 -- ============================================================
 -- END OF WAP POS SCHEMA

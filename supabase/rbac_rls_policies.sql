@@ -13,7 +13,13 @@ ALTER TABLE IF EXISTS permissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS role_permissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS branches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS brands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS engine_types ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS motorcycle_models ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS product_compatibility ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS product_groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS suppliers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS customers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS inventory_stocks ENABLE ROW LEVEL SECURITY;
@@ -336,6 +342,150 @@ CREATE POLICY "users_delete" ON users
     AND public.can_access_branch(branch_id)
   );
 
+CREATE POLICY "categories_select" ON categories
+  FOR SELECT
+  USING (
+    auth.uid() IS NOT NULL
+    AND (
+      public.has_permission('inventory', 'view')
+      OR public.has_permission('pos', 'view')
+      OR public.has_permission('purchasing', 'view')
+    )
+  );
+
+CREATE POLICY "categories_insert" ON categories
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('inventory', 'create')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "categories_update" ON categories
+  FOR UPDATE
+  USING (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  )
+  WITH CHECK (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "categories_delete" ON categories
+  FOR DELETE
+  USING (
+    public.has_permission('inventory', 'delete')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "brands_select" ON brands
+  FOR SELECT
+  USING (
+    auth.uid() IS NOT NULL
+    AND (
+      public.has_permission('inventory', 'view')
+      OR public.has_permission('pos', 'view')
+      OR public.has_permission('purchasing', 'view')
+    )
+  );
+
+CREATE POLICY "brands_insert" ON brands
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('inventory', 'create')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "brands_update" ON brands
+  FOR UPDATE
+  USING (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  )
+  WITH CHECK (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "brands_delete" ON brands
+  FOR DELETE
+  USING (
+    public.has_permission('inventory', 'delete')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "engine_types_select" ON engine_types
+  FOR SELECT
+  USING (
+    auth.uid() IS NOT NULL
+    AND (
+      public.has_permission('inventory', 'view')
+      OR public.has_permission('pos', 'view')
+      OR public.has_permission('customers', 'view')
+    )
+  );
+
+CREATE POLICY "engine_types_insert" ON engine_types
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('inventory', 'create')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "engine_types_update" ON engine_types
+  FOR UPDATE
+  USING (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  )
+  WITH CHECK (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "engine_types_delete" ON engine_types
+  FOR DELETE
+  USING (
+    public.has_permission('inventory', 'delete')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "motorcycle_models_select" ON motorcycle_models
+  FOR SELECT
+  USING (
+    auth.uid() IS NOT NULL
+    AND (
+      public.has_permission('inventory', 'view')
+      OR public.has_permission('pos', 'view')
+      OR public.has_permission('customers', 'view')
+    )
+  );
+
+CREATE POLICY "motorcycle_models_insert" ON motorcycle_models
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('inventory', 'create')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "motorcycle_models_update" ON motorcycle_models
+  FOR UPDATE
+  USING (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  )
+  WITH CHECK (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "motorcycle_models_delete" ON motorcycle_models
+  FOR DELETE
+  USING (
+    public.has_permission('inventory', 'delete')
+    OR public.has_permission('inventory', 'manage')
+  );
+
 CREATE POLICY "products_select" ON products
   FOR SELECT
   USING (
@@ -363,6 +513,77 @@ CREATE POLICY "products_update" ON products
   );
 
 CREATE POLICY "products_delete" ON products
+  FOR DELETE
+  USING (
+    public.has_permission('inventory', 'delete')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "product_compatibility_select" ON product_compatibility
+  FOR SELECT
+  USING (
+    auth.uid() IS NOT NULL
+    AND (
+      public.has_permission('inventory', 'view')
+      OR public.has_permission('pos', 'view')
+    )
+  );
+
+CREATE POLICY "product_compatibility_insert" ON product_compatibility
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "product_compatibility_update" ON product_compatibility
+  FOR UPDATE
+  USING (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  )
+  WITH CHECK (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "product_compatibility_delete" ON product_compatibility
+  FOR DELETE
+  USING (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "product_groups_select" ON product_groups
+  FOR SELECT
+  USING (
+    auth.uid() IS NOT NULL
+    AND (
+      public.has_permission('inventory', 'view')
+      OR public.has_permission('pos', 'view')
+      OR public.has_permission('purchasing', 'view')
+    )
+  );
+
+CREATE POLICY "product_groups_insert" ON product_groups
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('inventory', 'create')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "product_groups_update" ON product_groups
+  FOR UPDATE
+  USING (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  )
+  WITH CHECK (
+    public.has_permission('inventory', 'edit')
+    OR public.has_permission('inventory', 'manage')
+  );
+
+CREATE POLICY "product_groups_delete" ON product_groups
   FOR DELETE
   USING (
     public.has_permission('inventory', 'delete')
