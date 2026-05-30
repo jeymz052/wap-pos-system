@@ -332,6 +332,24 @@ export default function CatalogCompatibilityClient() {
     setLoading(true);
     setError("");
 
+    type SafeResult<T> = { data: T[]; error: null } | { data: []; error: { message: string } };
+
+    async function safeQuery<T>(promise: PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<SafeResult<T>> {
+      try {
+        const result = await promise;
+        if (result.error) {
+          const msg = result.error.message ?? "";
+          if (msg.includes("schema cache") || msg.includes("does not exist") || msg.includes("relation")) {
+            return { data: [], error: null };
+          }
+          return { data: [], error: result.error as { message: string } };
+        }
+        return { data: (result.data ?? []) as T[], error: null };
+      } catch {
+        return { data: [], error: null };
+      }
+    }
+
     const [
       categoriesResult,
       brandsResult,
@@ -341,70 +359,19 @@ export default function CatalogCompatibilityClient() {
       productsResult,
       compatibilityResult,
     ] = await Promise.all([
-      supabase.from("categories").select("id, name, parent_id, sort_order, is_active, created_at").order("sort_order", { ascending: true }).order("name", { ascending: true }),
-      supabase.from("brands").select("id, name, logo_url, is_active, created_at").order("name", { ascending: true }),
-      supabase.from("engine_types").select("id, name, code, description, displacement_cc, cooling_type, is_active, created_at").order("name", { ascending: true }),
-      supabase
-        .from("motorcycle_models")
-        .select(`
-          id,
-          brand,
-          model_name,
-          engine_type,
-          engine_type_id,
-          year_from,
-          year_to,
-          is_active,
-          created_at,
-          engine_type_ref:engine_types (
-            id,
-            name,
-            code,
-            description,
-            displacement_cc,
-            cooling_type,
-            is_active,
-            created_at
-          )
-        `)
-        .order("brand", { ascending: true })
-        .order("model_name", { ascending: true }),
-      supabase.from("product_groups").select("id, name, code, description, is_active, created_at").order("name", { ascending: true }),
-      supabase
-        .from("products")
-        .select(`
-          id,
-          name,
-          sku,
-          part_number,
-          category_id,
-          brand_id,
-          product_group_id,
-          category:categories (
-            name
-          ),
-          brand:brands (
-            name
-          ),
-          product_group:product_groups (
-            id,
-            name
-          )
-        `)
-        .order("name", { ascending: true }),
-      supabase
-        .from("product_compatibility")
-        .select(`
-          id,
-          product_id,
-          motorcycle_model_id,
-          notes,
-          product:products (
-            id,
-            name,
-            sku
-          ),
-          motorcycle_model:motorcycle_models (
+      safeQuery<CategoryRow>(
+        supabase.from("categories").select("id, name, parent_id, sort_order, is_active, created_at").order("sort_order", { ascending: true }).order("name", { ascending: true })
+      ),
+      safeQuery<BrandRow>(
+        supabase.from("brands").select("id, name, logo_url, is_active, created_at").order("name", { ascending: true })
+      ),
+      safeQuery<EngineTypeRow>(
+        supabase.from("engine_types").select("id, name, code, description, displacement_cc, cooling_type, is_active, created_at").order("name", { ascending: true })
+      ),
+      safeQuery<Record<string, unknown>>(
+        supabase
+          .from("motorcycle_models")
+          .select(`
             id,
             brand,
             model_name,
@@ -424,33 +391,94 @@ export default function CatalogCompatibilityClient() {
               is_active,
               created_at
             )
-          )
-        `)
-        .order("product_id", { ascending: true })
-        .order("motorcycle_model_id", { ascending: true }),
+          `)
+          .order("brand", { ascending: true })
+          .order("model_name", { ascending: true })
+      ),
+      safeQuery<ProductGroupRow>(
+        supabase.from("product_groups").select("id, name, code, description, is_active, created_at").order("name", { ascending: true })
+      ),
+      safeQuery<Record<string, unknown>>(
+        supabase
+          .from("products")
+          .select(`
+            id,
+            name,
+            sku,
+            part_number,
+            category_id,
+            brand_id,
+            product_group_id,
+            category:categories (
+              name
+            ),
+            brand:brands (
+              name
+            ),
+            product_group:product_groups (
+              id,
+              name
+            )
+          `)
+          .order("name", { ascending: true })
+      ),
+      safeQuery<Record<string, unknown>>(
+        supabase
+          .from("product_compatibility")
+          .select(`
+            id,
+            product_id,
+            motorcycle_model_id,
+            notes,
+            product:products (
+              id,
+              name,
+              sku
+            ),
+            motorcycle_model:motorcycle_models (
+              id,
+              brand,
+              model_name,
+              engine_type,
+              engine_type_id,
+              year_from,
+              year_to,
+              is_active,
+              created_at,
+              engine_type_ref:engine_types (
+                id,
+                name,
+                code,
+                description,
+                displacement_cc,
+                cooling_type,
+                is_active,
+                created_at
+              )
+            )
+          `)
+          .order("product_id", { ascending: true })
+          .order("motorcycle_model_id", { ascending: true })
+      ),
     ]);
 
-    const failedResult = [
-      categoriesResult,
-      brandsResult,
-      engineTypesResult,
-      motorcycleModelsResult,
-      productGroupsResult,
-      productsResult,
-      compatibilityResult,
-    ].find((result) => result.error);
-
-    if (failedResult?.error) {
-      setError(failedResult.error.message || "Unable to load Module 6 records.");
+    const criticalError = [categoriesResult, brandsResult, productsResult].find((result) => result.error);
+    if (criticalError?.error) {
+      setError(criticalError.error.message || "Unable to load Module 6 records.");
       setLoading(false);
       return;
     }
 
-    setCategories((categoriesResult.data ?? []) as CategoryRow[]);
-    setBrands((brandsResult.data ?? []) as BrandRow[]);
-    setEngineTypes((engineTypesResult.data ?? []) as EngineTypeRow[]);
+    const nonCriticalErrors = [engineTypesResult, motorcycleModelsResult, productGroupsResult, compatibilityResult].filter((result) => result.error);
+    if (nonCriticalErrors.length) {
+      setNotice({ tone: "error", message: "Some tables may not exist yet. Run the Module 6 migration in Supabase to enable all features." });
+    }
+
+    setCategories(categoriesResult.data);
+    setBrands(brandsResult.data);
+    setEngineTypes(engineTypesResult.data);
     setMotorcycleModels(normalizeMotorcycleModelRows(motorcycleModelsResult.data));
-    setProductGroups((productGroupsResult.data ?? []) as ProductGroupRow[]);
+    setProductGroups(productGroupsResult.data);
     const nextProducts = normalizeProductRows(productsResult.data);
     setProducts(nextProducts);
     setCompatibilityRows(normalizeCompatibilityRows(compatibilityResult.data));

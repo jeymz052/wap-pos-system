@@ -8,7 +8,7 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import {
   type RbacContextValue,
@@ -66,12 +66,17 @@ function clearCachedRbacState() {
   window.sessionStorage.removeItem(RBAC_CACHE_KEY);
 }
 
+function hardRedirect(path: string) {
+  if (typeof window === "undefined") return;
+  if (window.location.pathname === path) return;
+  window.location.replace(path);
+}
+
 export function useRbac() {
   return useContext(RbacContext);
 }
 
 export function RbacProvider({ children }: { children: ReactNode }) {
-  const router = useRouter();
   const pathname = usePathname();
   const [cachedState] = useState<CachedRbacState | null>(() => readCachedRbacState());
 
@@ -97,32 +102,27 @@ export function RbacProvider({ children }: { children: ReactNode }) {
       setLoading(false);
 
       if (!PUBLIC_ROUTES.includes(pathname)) {
-        router.replace(LOGIN_REDIRECT);
+        hardRedirect(LOGIN_REDIRECT);
       }
       return;
     }
 
-    let profile: UserProfile | null = null;
+    const response = await fetch("/api/auth/access", {
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+      },
+    });
 
-    const { data: profileByAuthId } = await supabase
-      .from("users")
-      .select("id,first_name,last_name,username,email,role_id,branch_id,is_active")
-      .eq("auth_id", session.user.id)
-      .maybeSingle();
+    const payload = (await response.json()) as {
+      user?: UserProfile | null;
+      role?: RoleInfo | null;
+      permissions?: string[];
+    };
 
-    profile = (profileByAuthId as UserProfile | null) ?? null;
+    const profile = payload.user ?? null;
+    const resolvedRole = payload.role ?? null;
 
-    if (!profile && session.user.email) {
-      const { data: profileRows } = await supabase
-        .from("users")
-        .select("id,first_name,last_name,username,email,role_id,branch_id,is_active")
-        .eq("email", session.user.email)
-        .limit(1);
-
-      profile = (profileRows?.[0] as UserProfile | undefined) ?? null;
-    }
-
-    if (!profile) {
+    if (!response.ok || !profile) {
       setUser(null);
       setRole(null);
       setPermissions(new Set());
@@ -132,40 +132,8 @@ export function RbacProvider({ children }: { children: ReactNode }) {
     }
 
     setUser(profile);
-
-    if (!profile.role_id) {
-      setRole(null);
-      setPermissions(new Set());
-      writeCachedRbacState({
-        user: profile,
-        role: null,
-        permissions: [],
-      });
-      setLoading(false);
-      return;
-    }
-
-    const { data: roleRow } = await supabase
-      .from("roles")
-      .select("id,name,description")
-      .eq("id", profile.role_id)
-      .single();
-
-    const resolvedRole = (roleRow as RoleInfo | null) ?? null;
     setRole(resolvedRole);
-
-    const { data: rpRows } = await supabase
-      .from("role_permissions")
-      .select("permission_id, is_allowed, permissions(module, action)")
-      .eq("role_id", profile.role_id)
-      .eq("is_allowed", true);
-
-    const permSet = new Set<string>();
-    (rpRows as unknown as Array<{ permissions: { module: string; action: string } | null }> ?? []).forEach((rp) => {
-      if (rp.permissions) {
-        permSet.add(`${rp.permissions.module}:${rp.permissions.action}`);
-      }
-    });
+    const permSet = new Set(payload.permissions ?? []);
 
     setPermissions(permSet);
     writeCachedRbacState({
@@ -174,7 +142,7 @@ export function RbacProvider({ children }: { children: ReactNode }) {
       permissions: Array.from(permSet),
     });
     setLoading(false);
-  }, [pathname, router]);
+  }, [pathname]);
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => {
@@ -196,7 +164,7 @@ export function RbacProvider({ children }: { children: ReactNode }) {
     if (PUBLIC_ROUTES.includes(pathname)) return;
 
     if (!user) {
-      router.replace(LOGIN_REDIRECT);
+      hardRedirect(LOGIN_REDIRECT);
       return;
     }
 
@@ -206,9 +174,9 @@ export function RbacProvider({ children }: { children: ReactNode }) {
 
     if (requiredPerm && !permissions.has(requiredPerm)) {
       if (role?.name === "super_admin") return;
-      router.replace(DENIED_REDIRECT);
+      hardRedirect(DENIED_REDIRECT);
     }
-  }, [pathname, loading, user, permissions, role, router]);
+  }, [pathname, loading, user, permissions, role]);
 
   const can = useCallback(
     (...perms: Permission[]) => {

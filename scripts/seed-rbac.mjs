@@ -88,6 +88,12 @@ const PERMISSIONS = [
   { module:"purchasing",    action:"approve",        description:"Approve purchase orders" },
   { module:"purchasing",    action:"delete",         description:"Delete draft purchase orders" },
   { module:"purchasing",    action:"manage",         description:"Full purchasing management access" },
+  { module:"sales_orders",  action:"view",           description:"View quotations, sales orders, and pricing rules" },
+  { module:"sales_orders",  action:"create",         description:"Create quotations and sales orders" },
+  { module:"sales_orders",  action:"edit",           description:"Edit quotations, sales orders, and reservations" },
+  { module:"sales_orders",  action:"approve",        description:"Approve quotations or convert them to sales" },
+  { module:"sales_orders",  action:"email",          description:"Send quotations via email" },
+  { module:"sales_orders",  action:"manage",         description:"Full quotation and sales order management access" },
   { module:"suppliers",     action:"view",           description:"View supplier list and details" },
   { module:"suppliers",     action:"create",         description:"Add new suppliers" },
   { module:"suppliers",     action:"edit",           description:"Edit supplier information" },
@@ -102,6 +108,8 @@ const PERMISSIONS = [
   { module:"reports",       action:"create",         description:"Generate and schedule reports" },
   { module:"reports",       action:"export",         description:"Export reports to PDF or Excel" },
   { module:"reports",       action:"manage",         description:"Full reports management access" },
+  { module:"notifications", action:"view",           description:"View in-app notifications and alert history" },
+  { module:"notifications", action:"manage",         description:"Manage alert generation and notification delivery" },
   { module:"settings",      action:"view",           description:"View system settings" },
   { module:"settings",      action:"edit",           description:"Edit system settings" },
   { module:"settings",      action:"manage",         description:"Full settings management access" },
@@ -131,12 +139,12 @@ const PERMISSIONS = [
 
 const ROLE_PERMS = {
   super_admin:     { __all__: true },
-  admin:           { dashboard:["view"], pos:["view","create","edit","void","apply_discount","hold_order","print_receipt","manage"], inventory:["view","create","edit","receive_stock","adjust_stock","transfer_stock","print_barcode","manage"], purchasing:["view","create","edit","approve","manage"], suppliers:["view","create","edit","manage"], customers:["view","create","edit","manage"], reports:["view","create","export","manage"], settings:["view","edit"], users:["view","create","edit"], branches:["view"], returns:["view","create","approve","manage"], expenses:["view","create","edit","approve","manage"], audit_logs:["view"] },
-  manager:         { dashboard:["view"], pos:["view","create","edit","apply_discount","hold_order","print_receipt","manage"], inventory:["view","create","edit","receive_stock","adjust_stock","transfer_stock","manage"], purchasing:["view","create","edit","approve","manage"], suppliers:["view","create","edit"], customers:["view","create","edit","manage"], reports:["view","create","export"], settings:["view"], users:["view","create","edit"], branches:["view"], returns:["view","create","approve","manage"], expenses:["view","create","edit"] },
-  cashier:         { pos:["view","create","apply_discount","hold_order","print_receipt"], inventory:["view"], customers:["view","create"], reports:["view"] },
-  inventory_staff: { inventory:["view","create","edit","receive_stock","adjust_stock","transfer_stock","print_barcode","manage"], purchasing:["view","create"], suppliers:["view"], reports:["view"] },
-  accountant:      { reports:["view","create","export"], expenses:["view","create","edit","approve"], purchasing:["view"], customers:["view"], suppliers:["view"], pos:["view"] },
-  branch_staff:    { pos:["view","create","print_receipt"], inventory:["view"], customers:["view","create"], reports:["view"] },
+  admin:           { dashboard:["view"], pos:["view","create","edit","void","apply_discount","hold_order","print_receipt","manage"], inventory:["view","create","edit","receive_stock","adjust_stock","transfer_stock","print_barcode","manage"], purchasing:["view","create","edit","approve","manage"], sales_orders:["view","create","edit","approve","email","manage"], suppliers:["view","create","edit","manage"], customers:["view","create","edit","manage"], reports:["view","create","export","manage"], notifications:["view","manage"], settings:["view","edit"], users:["view","create","edit"], branches:["view"], returns:["view","create","approve","manage"], expenses:["view","create","edit","approve","manage"], audit_logs:["view"] },
+  manager:         { dashboard:["view"], pos:["view","create","edit","apply_discount","hold_order","print_receipt","manage"], inventory:["view","create","edit","receive_stock","adjust_stock","transfer_stock","manage"], purchasing:["view","create","edit","approve","manage"], sales_orders:["view","create","edit","approve","email","manage"], suppliers:["view","create","edit"], customers:["view","create","edit","manage"], reports:["view","create","export"], notifications:["view"], settings:["view"], users:["view","create","edit"], branches:["view"], returns:["view","create","approve","manage"], expenses:["view","create","edit"] },
+  cashier:         { pos:["view","create","apply_discount","hold_order","print_receipt"], sales_orders:["view","create","approve"], inventory:["view"], customers:["view","create"], reports:["view"], notifications:["view"] },
+  inventory_staff: { inventory:["view","create","edit","receive_stock","adjust_stock","transfer_stock","print_barcode","manage"], purchasing:["view","create"], sales_orders:["view"], suppliers:["view"], reports:["view"], notifications:["view"] },
+  accountant:      { reports:["view","create","export"], expenses:["view","create","edit","approve"], purchasing:["view"], sales_orders:["view"], customers:["view"], suppliers:["view"], pos:["view"], notifications:["view"] },
+  branch_staff:    { pos:["view","create","print_receipt"], sales_orders:["view","create"], inventory:["view"], customers:["view","create"], reports:["view"], notifications:["view"] },
 };
 
 // ── Seed ─────────────────────────────────────────────────────────────────────

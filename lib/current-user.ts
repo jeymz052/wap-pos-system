@@ -51,6 +51,12 @@ function getProfileFullName(profileUser?: ProfileUserLike) {
   return [firstName, lastName].filter(Boolean).join(" ");
 }
 
+function getMetadataFullName(metadata: MetadataRecord) {
+  const firstName = pickMetadataString(metadata, "first_name", "firstname", "given_name");
+  const lastName = pickMetadataString(metadata, "last_name", "lastname", "family_name");
+  return [firstName, lastName].filter(Boolean).join(" ").trim();
+}
+
 export function getInitials(name: string) {
   return (
     name
@@ -71,8 +77,11 @@ export function resolveCurrentUserInfo({
   profileUser?: ProfileUserLike;
   roleName?: string | null;
 }) {
-  const authUsername = pickMetadataString(authUser?.user_metadata, "username", "user_name", "handle", "display_name");
-  const authFullName = pickMetadataString(authUser?.user_metadata, "full_name", "name", "display_name");
+  const authUsername = pickMetadataString(authUser?.user_metadata, "username", "user_name", "handle");
+  const authFullName = pickString(
+    getMetadataFullName(authUser?.user_metadata),
+    pickMetadataString(authUser?.user_metadata, "full_name", "name", "display_name")
+  );
   const authRole =
     pickMetadataString(authUser?.user_metadata, "role", "role_name", "user_role") ||
     pickMetadataString(authUser?.app_metadata, "role", "role_name", "user_role");

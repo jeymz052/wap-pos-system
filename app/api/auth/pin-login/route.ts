@@ -17,6 +17,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Username and PIN are required." }, { status: 400 });
     }
 
+    const policyResult = await supabaseAdmin.rpc("get_password_policy");
+    if (policyResult.error) {
+      return NextResponse.json({ error: policyResult.error.message }, { status: 500 });
+    }
+
+    const pinLength = Number((policyResult.data as Record<string, unknown> | null)?.pin_length ?? 4);
+    if (!new RegExp(`^\\d{${pinLength}}$`).test(pin)) {
+      return NextResponse.json({ error: `PIN must be exactly ${pinLength} digits.` }, { status: 400 });
+    }
+
     const ip        = req.headers.get("x-forwarded-for") ?? req.headers.get("x-real-ip") ?? "unknown";
     const userAgent = req.headers.get("user-agent") ?? "unknown";
 

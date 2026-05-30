@@ -35,6 +35,7 @@ INSERT INTO permissions (module, action, description) VALUES
 
   -- Inventory
   ('inventory',     'view',           'View product list and stock levels'),
+  ('inventory',     'view_cost_price','View product cost price and margin-sensitive inventory values'),
   ('inventory',     'create',         'Add new products to the catalogue'),
   ('inventory',     'edit',           'Edit existing product details'),
   ('inventory',     'delete',         'Delete or deactivate products'),
@@ -51,6 +52,14 @@ INSERT INTO permissions (module, action, description) VALUES
   ('purchasing',    'approve',        'Approve purchase orders'),
   ('purchasing',    'delete',         'Delete draft purchase orders'),
   ('purchasing',    'manage',         'Full purchasing management access'),
+
+  -- Sales Orders & Quotations
+  ('sales_orders',  'view',           'View quotations, sales orders, and pricing rules'),
+  ('sales_orders',  'create',         'Create quotations and sales orders'),
+  ('sales_orders',  'edit',           'Edit quotations, sales orders, and reservations'),
+  ('sales_orders',  'approve',        'Approve quotations or convert them to sales'),
+  ('sales_orders',  'email',          'Send quotations via email'),
+  ('sales_orders',  'manage',         'Full quotation and sales order management access'),
 
   -- Suppliers
   ('suppliers',     'view',           'View supplier list and details'),
@@ -71,6 +80,10 @@ INSERT INTO permissions (module, action, description) VALUES
   ('reports',       'create',         'Generate and schedule reports'),
   ('reports',       'export',         'Export reports to PDF or Excel'),
   ('reports',       'manage',         'Full reports management access'),
+
+  -- Notifications
+  ('notifications', 'view',           'View in-app notifications and alert history'),
+  ('notifications', 'manage',         'Manage alert generation and notification delivery'),
 
   -- Settings
   ('settings',      'view',           'View system settings'),
@@ -102,6 +115,7 @@ INSERT INTO permissions (module, action, description) VALUES
   ('returns',       'view',           'View return and refund requests'),
   ('returns',       'create',         'Create new return requests'),
   ('returns',       'approve',        'Approve or reject return requests'),
+  ('returns',       'refund',         'Finalize customer refunds and issue store credit'),
   ('returns',       'manage',         'Full returns and refund management'),
 
   -- Expenses
@@ -145,15 +159,17 @@ WITH
     FROM   r JOIN p ON (
         (p.module = 'dashboard'     AND p.action IN ('view'))
      OR (p.module = 'pos'           AND p.action IN ('view','create','edit','void','apply_discount','hold_order','print_receipt','manage'))
-     OR (p.module = 'inventory'     AND p.action IN ('view','create','edit','receive_stock','adjust_stock','transfer_stock','print_barcode','manage'))
+     OR (p.module = 'inventory'     AND p.action IN ('view','view_cost_price','create','edit','receive_stock','adjust_stock','transfer_stock','print_barcode','manage'))
      OR (p.module = 'purchasing'    AND p.action IN ('view','create','edit','approve','manage'))
+     OR (p.module = 'sales_orders'  AND p.action IN ('view','create','edit','approve','email','manage'))
      OR (p.module = 'suppliers'     AND p.action IN ('view','create','edit','manage'))
      OR (p.module = 'customers'     AND p.action IN ('view','create','edit','manage'))
      OR (p.module = 'reports'       AND p.action IN ('view','create','export','manage'))
+     OR (p.module = 'notifications' AND p.action IN ('view','manage'))
      OR (p.module = 'settings'      AND p.action IN ('view','edit'))
      OR (p.module = 'users'         AND p.action IN ('view','create','edit'))
      OR (p.module = 'branches'      AND p.action IN ('view'))
-     OR (p.module = 'returns'       AND p.action IN ('view','create','approve','manage'))
+     OR (p.module = 'returns'       AND p.action IN ('view','create','approve','refund','manage'))
      OR (p.module = 'expenses'      AND p.action IN ('view','create','edit','approve','manage'))
      OR (p.module = 'receivables'   AND p.action IN ('view','create','edit','manage'))
      OR (p.module = 'payables'      AND p.action IN ('view','create','edit','manage'))
@@ -167,9 +183,11 @@ WITH
     SELECT r.id AS role_id, p.id AS permission_id
     FROM   r JOIN p ON (
         (p.module = 'pos'           AND p.action IN ('view','create','apply_discount','hold_order','print_receipt'))
+     OR (p.module = 'sales_orders'  AND p.action IN ('view','create','approve'))
      OR (p.module = 'inventory'     AND p.action IN ('view'))
      OR (p.module = 'customers'     AND p.action IN ('view','create'))
      OR (p.module = 'reports'       AND p.action IN ('view'))
+     OR (p.module = 'notifications' AND p.action IN ('view'))
     )
     WHERE r.name = 'cashier'
   ),
@@ -178,10 +196,12 @@ WITH
   inventory_staff_perms AS (
     SELECT r.id AS role_id, p.id AS permission_id
     FROM   r JOIN p ON (
-        (p.module = 'inventory'     AND p.action IN ('view','create','edit','receive_stock','adjust_stock','transfer_stock','print_barcode','manage'))
+        (p.module = 'inventory'     AND p.action IN ('view','view_cost_price','create','edit','receive_stock','adjust_stock','transfer_stock','print_barcode','manage'))
      OR (p.module = 'purchasing'    AND p.action IN ('view','create'))
+     OR (p.module = 'sales_orders'  AND p.action IN ('view'))
      OR (p.module = 'suppliers'     AND p.action IN ('view'))
      OR (p.module = 'reports'       AND p.action IN ('view'))
+     OR (p.module = 'notifications' AND p.action IN ('view'))
     )
     WHERE r.name = 'inventory_staff'
   ),
@@ -191,13 +211,16 @@ WITH
     SELECT r.id AS role_id, p.id AS permission_id
     FROM   r JOIN p ON (
         (p.module = 'reports'       AND p.action IN ('view','create','export'))
+     OR (p.module = 'inventory'     AND p.action IN ('view_cost_price'))
      OR (p.module = 'expenses'      AND p.action IN ('view','create','edit','approve'))
      OR (p.module = 'receivables'   AND p.action IN ('view','create','edit'))
      OR (p.module = 'payables'      AND p.action IN ('view','create','edit'))
      OR (p.module = 'purchasing'    AND p.action IN ('view'))
+     OR (p.module = 'sales_orders'  AND p.action IN ('view'))
      OR (p.module = 'customers'     AND p.action IN ('view'))
      OR (p.module = 'suppliers'     AND p.action IN ('view'))
      OR (p.module = 'pos'           AND p.action IN ('view'))
+     OR (p.module = 'notifications' AND p.action IN ('view'))
     )
     WHERE r.name = 'accountant'
   ),
@@ -207,9 +230,11 @@ WITH
     SELECT r.id AS role_id, p.id AS permission_id
     FROM   r JOIN p ON (
         (p.module = 'pos'           AND p.action IN ('view','create','print_receipt'))
+     OR (p.module = 'sales_orders'  AND p.action IN ('view','create'))
      OR (p.module = 'inventory'     AND p.action IN ('view'))
      OR (p.module = 'customers'     AND p.action IN ('view','create'))
      OR (p.module = 'reports'       AND p.action IN ('view'))
+     OR (p.module = 'notifications' AND p.action IN ('view'))
     )
     WHERE r.name = 'branch_staff'
   ),

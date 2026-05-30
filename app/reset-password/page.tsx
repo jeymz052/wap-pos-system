@@ -1,14 +1,14 @@
 "use client";
 
 import { Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Eye, EyeOff, KeyRound, Lock, RefreshCw, ShieldCheck } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { evaluatePassword, DEFAULT_POLICY } from "@/lib/auth-security";
+import { evaluatePassword, DEFAULT_POLICY, type PasswordPolicy } from "@/lib/auth-security";
+import { normalizeSecurityPolicy } from "@/lib/security-policy";
 
-function PasswordStrengthBar({ password }: { password: string }) {
-  const strength = evaluatePassword(password);
+function PasswordStrengthBar({ password, policy }: { password: string; policy: PasswordPolicy }) {
+  const strength = evaluatePassword(password, policy);
   if (!password) return null;
   return (
     <div className="pwd-strength">
@@ -29,9 +29,6 @@ function PasswordStrengthBar({ password }: { password: string }) {
 }
 
 function ResetPasswordForm() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-
   const [password, setPassword]         = useState("");
   const [confirm, setConfirm]           = useState("");
   const [showPw, setShowPw]             = useState(false);
@@ -39,8 +36,20 @@ function ResetPasswordForm() {
   const [loading, setLoading]           = useState(false);
   const [error, setError]               = useState("");
   const [success, setSuccess]           = useState(false);
+  const [securityPolicy, setSecurityPolicy] = useState<PasswordPolicy>(DEFAULT_POLICY);
 
-  const strength = evaluatePassword(password, DEFAULT_POLICY);
+  useEffect(() => {
+    const timer = window.setTimeout(async () => {
+      const { data, error: policyError } = await supabase.rpc("get_password_policy");
+      if (!policyError) {
+        setSecurityPolicy(normalizeSecurityPolicy((data as Record<string, unknown> | null) ?? null));
+      }
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const strength = evaluatePassword(password, securityPolicy);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -59,17 +68,30 @@ function ResetPasswordForm() {
 
     // Supabase uses the hash fragment for reset tokens — the session is set automatically
     // when the user arrives at this page via the reset link.
-    const { error: updateError } = await supabase.auth.updateUser({ password });
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
-    if (updateError) {
-      setError(updateError.message);
+    const response = await fetch("/api/auth/update-password", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session?.access_token ?? ""}`,
+      },
+      body: JSON.stringify({ password }),
+    });
+
+    const payload = (await response.json()) as { error?: string };
+
+    if (!response.ok) {
+      setError(payload.error ?? "Unable to update password.");
       setLoading(false);
       return;
     }
 
     setSuccess(true);
     setTimeout(() => {
-      router.push("/?reason=password_reset");
+      window.location.replace("/?reason=password_reset");
     }, 2500);
   };
 
@@ -104,9 +126,10 @@ function ResetPasswordForm() {
         <p className="reset-pw__req-title">Password must have:</p>
         <ul className="reset-pw__req-list">
           {[
-            { label: `At least ${DEFAULT_POLICY.password_min_length} characters`, ok: password.length >= DEFAULT_POLICY.password_min_length },
-            { label: "One uppercase letter", ok: /[A-Z]/.test(password) },
-            { label: "One number",           ok: /[0-9]/.test(password) },
+            { label: `At least ${securityPolicy.password_min_length} characters`, ok: password.length >= securityPolicy.password_min_length },
+            { label: "One uppercase letter", ok: !securityPolicy.password_require_uppercase || /[A-Z]/.test(password) },
+            { label: "One number",           ok: !securityPolicy.password_require_number || /[0-9]/.test(password) },
+            ...(securityPolicy.password_require_symbol ? [{ label: "One special character", ok: /[^A-Za-z0-9]/.test(password) }] : []),
           ].map(({ label, ok }) => (
             <li key={label} className={`reset-pw__req-item ${ok ? "reset-pw__req-item--ok" : ""}`}>
               <span className="reset-pw__req-dot" />
@@ -139,7 +162,7 @@ function ResetPasswordForm() {
             {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
           </button>
         </div>
-        <PasswordStrengthBar password={password} />
+        <PasswordStrengthBar password={password} policy={securityPolicy} />
       </label>
 
       <label className="login-form__field">

@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { InactivityTimer } from "@/lib/auth-security";
 
@@ -20,7 +19,6 @@ export function useInactivityLogout({
   onWarning,
   onLogout,
 }: UseInactivityLogoutOptions) {
-  const router = useRouter();
   const timerRef = useRef<InactivityTimer | null>(null);
 
   const doLogout = useCallback(async () => {
@@ -28,9 +26,8 @@ export function useInactivityLogout({
     sessionStorage.removeItem(INACTIVITY_KEY);
     await supabase.auth.signOut();
     if (onLogout) onLogout();
-    router.replace("/?reason=inactivity");
-    router.refresh();
-  }, [router, onLogout]);
+    window.location.replace("/?reason=inactivity");
+  }, [onLogout]);
 
   const handleWarning = useCallback(() => {
     sessionStorage.setItem(INACTIVITY_KEY, "1");
@@ -56,6 +53,9 @@ export function useInactivityLogout({
   }, [timeoutMinutes, warningMinutes, handleWarning, doLogout]);
 
   return {
-    resetTimer: () => timerRef.current?.stop(),
+    restartTimer: () => {
+      sessionStorage.removeItem(INACTIVITY_KEY);
+      timerRef.current?.ping();
+    },
   };
 }

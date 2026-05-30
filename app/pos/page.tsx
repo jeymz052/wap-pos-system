@@ -56,6 +56,10 @@ type CustomerOption = {
   customer_type?: string | null;
   email?: string | null;
   phone?: string | null;
+  credit_limit?: string | number | null;
+  current_balance?: string | number | null;
+  allow_credit?: boolean | null;
+  default_credit_terms_days?: number | null;
 };
 
 type ProductImageRow = {
@@ -174,12 +178,17 @@ type CartItem = ProductCard & {
 type ReceiptState = {
   saleId: string;
   invoiceNumber: string;
+  issuedAt?: string;
   payments: PaymentLine[];
   amountPaid: number;
   changeAmount: number;
   customerName: string;
   customerEmail?: string | null;
   customerPhone?: string | null;
+  shopName?: string;
+  shopAddress?: string;
+  shopPhone?: string;
+  shopTaxId?: string;
   items: Array<{
     name: string;
     sku: string;
@@ -212,6 +221,16 @@ type SummaryCard = {
   value: string;
   icon: LucideIcon;
   tone: "blue" | "violet" | "orange";
+};
+
+type RecentTransactionRow = {
+  saleId: string;
+  invoice: string;
+  customer: string;
+  amount: number;
+  payment: string;
+  cashier: string;
+  time: string;
 };
 
 const productIcons: LucideIcon[] = [
@@ -368,12 +387,11 @@ export default function POSPage() {
   const [selectedCustomerId, setSelectedCustomerId] = useState("walk-in");
   const [salesNote, setSalesNote] = useState("");
   const [discountValue, setDiscountValue] = useState("0");
+  const [selectedBrandFilter, setSelectedBrandFilter] = useState("all");
   const [selectedMotorcycleFilter, setSelectedMotorcycleFilter] = useState("all");
   const [selectedEngineFilter, setSelectedEngineFilter] = useState("all");
   const [selectedYearFilter, setSelectedYearFilter] = useState("");
-  const [recentTransactions, setRecentTransactions] = useState<
-    Array<{ invoice: string; customer: string; amount: number; payment: string; cashier: string; time: string }>
-  >([]);
+  const [recentTransactions, setRecentTransactions] = useState<RecentTransactionRow[]>([]);
   const [recentItems, setRecentItems] = useState<Array<{ sku: string; name: string; price: number; icon: LucideIcon; tint: string }>>([]);
   const [summaryCards, setSummaryCards] = useState<SummaryCard[]>([
     { label: "Total Sales", value: formatPeso(0), icon: Wallet, tone: "blue" },
@@ -383,6 +401,8 @@ export default function POSPage() {
   const [heldSalesCount, setHeldSalesCount] = useState(0);
   const [availablePaymentMethods, setAvailablePaymentMethods] = useState(paymentMethodOrder);
   const [currentShiftId, setCurrentShiftId] = useState<string | null>(null);
+  const [shiftReviewId, setShiftReviewId] = useState<string | null>(null);
+  const [currentShiftStatus, setCurrentShiftStatus] = useState<string | null>(null);
   const [expectedCash, setExpectedCash] = useState(0);
   const [refreshToken, setRefreshToken] = useState(0);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -393,9 +413,14 @@ export default function POSPage() {
   const [showShiftModal, setShowShiftModal] = useState(false);
   const [showCameraScanner, setShowCameraScanner] = useState(false);
   const [editingCartItemId, setEditingCartItemId] = useState<string | null>(null);
+  const [reprintingSaleId, setReprintingSaleId] = useState<string | null>(null);
   const [receiptState, setReceiptState] = useState<ReceiptState | null>(null);
   const [receiptHeader, setReceiptHeader] = useState("WAP Motorparts Trading");
   const [receiptFooter, setReceiptFooter] = useState("Thank you for your purchase!");
+  const [shopName, setShopName] = useState("WAP Motorparts Trading");
+  const [shopAddress, setShopAddress] = useState("");
+  const [shopPhone, setShopPhone] = useState("");
+  const [shopTaxId, setShopTaxId] = useState("");
   const [cashDrawerEnabled, setCashDrawerEnabled] = useState(false);
   const [cashDrawerUrl, setCashDrawerUrl] = useState("");
 
@@ -494,9 +519,13 @@ export default function POSPage() {
       monthStart.setDate(1);
       monthStart.setHours(0, 0, 0, 0);
 
-      const [categoryResult, customerResult, inventoryResult, salesResult, heldSalesResult, shiftResult, settingsResult] = await Promise.all([
+      const [categoryResult, customerResult, inventoryResult, branchPricingResult, salesResult, heldSalesResult, shiftResult, settingsResult] = await Promise.all([
         supabase.from("categories").select("id, name").eq("is_active", true).order("sort_order", { ascending: true }),
-        supabase.from("customers").select("id, name, branch_id, customer_type, email, phone").eq("is_active", true).order("name", { ascending: true }),
+        supabase
+          .from("customers")
+          .select("id, name, branch_id, customer_type, email, phone, credit_limit, current_balance, allow_credit, default_credit_terms_days")
+          .eq("is_active", true)
+          .order("name", { ascending: true }),
         supabase
           .from("inventory_stocks")
           .select(`
@@ -539,6 +568,11 @@ export default function POSPage() {
           .eq("branch_id", selectedBranchId)
           .order("updated_at", { ascending: false }),
         supabase
+          .from("branch_product_prices")
+          .select("product_id, price, is_active")
+          .eq("branch_id", selectedBranchId)
+          .eq("is_active", true),
+        supabase
           .from("sales")
           .select("id, invoice_number, customer_id, cashier_id, subtotal, discount_amount, tax_amount, total_amount, created_at")
           .eq("branch_id", selectedBranchId)
@@ -553,26 +587,37 @@ export default function POSPage() {
         cashierUserId
           ? supabase
               .from("cash_shifts")
-              .select("id, expected_cash")
+              .select("id, expected_cash, status")
               .eq("branch_id", selectedBranchId)
               .eq("cashier_id", cashierUserId)
-              .eq("status", "open")
+              .in("status", ["open", "pending_approval"])
+              .order("opened_at", { ascending: false })
               .limit(1)
           : Promise.resolve({ data: [], error: null }),
         supabase
           .from("settings")
           .select("key, value")
           .is("branch_id", null)
-          .in("key", ["pos_receipt_header", "pos_receipt_footer", "pos_cash_drawer_enabled", "pos_cash_drawer_url"]),
+          .in("key", [
+            "pos_receipt_header",
+            "pos_receipt_footer",
+            "pos_cash_drawer_enabled",
+            "pos_cash_drawer_url",
+            "shop_name",
+            "shop_address",
+            "shop_phone",
+            "shop_tax_id",
+          ]),
       ]);
 
       if (!isMounted) return;
 
-      if (categoryResult.error || customerResult.error || inventoryResult.error || salesResult.error || heldSalesResult.error || shiftResult.error || settingsResult.error) {
+      if (categoryResult.error || customerResult.error || inventoryResult.error || branchPricingResult.error || salesResult.error || heldSalesResult.error || shiftResult.error || settingsResult.error) {
         setError(
           categoryResult.error?.message
           || customerResult.error?.message
           || inventoryResult.error?.message
+          || branchPricingResult.error?.message
           || salesResult.error?.message
           || heldSalesResult.error?.message
           || shiftResult.error?.message
@@ -588,6 +633,12 @@ export default function POSPage() {
         (customer) => !customer.branch_id || customer.branch_id === selectedBranchId
       );
       const inventoryRows = (inventoryResult.data ?? []) as unknown as InventorySourceRow[];
+      const branchPriceMap = new Map(
+        ((branchPricingResult.data ?? []) as Array<{ product_id: string; price: string | number | null }>).map((row) => [
+          row.product_id,
+          parseNumber(row.price),
+        ]),
+      );
       const salesRows = (salesResult.data ?? []) as SaleRow[];
 
       const normalizedProducts = inventoryRows
@@ -608,7 +659,7 @@ export default function POSPage() {
             partNumber: product.part_number ?? "",
             supplierCode: product.supplier_code ?? "",
             shelfLocation: product.shelf_location ?? "",
-            price: parseNumber(product.selling_price),
+            price: branchPriceMap.get(product.id) ?? parseNumber(product.selling_price),
             stock: row.quantity,
             categoryId: product.category?.id ?? "",
             categoryName: product.category?.name ?? "Others",
@@ -684,6 +735,7 @@ export default function POSPage() {
       });
 
       const transactions = salesRows.slice(0, 4).map((sale) => ({
+        saleId: sale.id,
         invoice: sale.invoice_number,
         customer: sale.customer_id ? transactionCustomers.get(sale.customer_id) ?? "Walk-in Customer" : "Walk-in Customer",
         amount: parseNumber(sale.total_amount),
@@ -724,6 +776,10 @@ export default function POSPage() {
       setProducts(normalizedProducts);
       setReceiptHeader(settingsMap.get("pos_receipt_header") || "WAP Motorparts Trading");
       setReceiptFooter(settingsMap.get("pos_receipt_footer") || "Thank you for your purchase!");
+      setShopName(settingsMap.get("shop_name") || "WAP Motorparts Trading");
+      setShopAddress(settingsMap.get("shop_address") || "");
+      setShopPhone(settingsMap.get("shop_phone") || "");
+      setShopTaxId(settingsMap.get("shop_tax_id") || "");
       setCashDrawerEnabled(settingsMap.get("pos_cash_drawer_enabled") === "true");
       setCashDrawerUrl(settingsMap.get("pos_cash_drawer_url") || "");
       setRecentTransactions(transactions);
@@ -735,8 +791,11 @@ export default function POSPage() {
       ]);
       setHeldSalesCount(heldSalesResult.count ?? 0);
       setAvailablePaymentMethods(paymentMethodOrder.filter((method) => methodSet.has(method)));
-      setCurrentShiftId((shiftResult.data?.[0] as { id: string } | undefined)?.id ?? null);
-      setExpectedCash(parseNumber((shiftResult.data?.[0] as { expected_cash?: number | string | null } | undefined)?.expected_cash));
+      const activeShift = (shiftResult.data?.[0] as { id: string; status?: string; expected_cash?: number | string | null } | undefined) ?? undefined;
+      setShiftReviewId(activeShift?.id ?? null);
+      setCurrentShiftStatus(activeShift?.status ?? null);
+      setCurrentShiftId(activeShift?.status === "open" ? activeShift.id : null);
+      setExpectedCash(parseNumber(activeShift?.expected_cash));
       setLoading(false);
 
       if (!(shiftResult.data ?? []).length) {
@@ -760,11 +819,15 @@ export default function POSPage() {
   const canOverridePrice = canAny("pos:edit", "pos:manage");
   const motorcycleFilterOptions = Array.from(new Set(products.flatMap((product) => product.motorcycleModels))).sort();
   const engineFilterOptions = Array.from(new Set(products.flatMap((product) => product.engineTypes))).sort();
+  const brandFilterOptions = Array.from(new Set(products.map((product) => product.brandName).filter(Boolean))).sort();
 
   const normalizedQuery = deferredSearchValue.trim().toLowerCase();
   const filteredProducts = products.filter((product) => {
     const matchesCategory = selectedCategoryId === "all" || product.categoryId === selectedCategoryId;
     if (!matchesCategory) return false;
+
+    const matchesBrand = selectedBrandFilter === "all" || product.brandName.toLowerCase() === selectedBrandFilter.toLowerCase();
+    if (!matchesBrand) return false;
 
     const matchesMotorcycle = selectedMotorcycleFilter === "all"
       || product.motorcycleModels.some((value) => value.toLowerCase() === selectedMotorcycleFilter.toLowerCase());
@@ -807,6 +870,18 @@ export default function POSPage() {
 
   const selectedBranch = branchOptions.find((branch) => branch.id === selectedBranchId);
   const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId);
+  const selectedCustomerCredit = selectedCustomer
+    ? {
+        creditLimit: parseNumber(selectedCustomer.credit_limit),
+        currentBalance: parseNumber(selectedCustomer.current_balance),
+        availableCredit: Math.max(
+          0,
+          parseNumber(selectedCustomer.credit_limit) - parseNumber(selectedCustomer.current_balance)
+        ),
+        allowCredit: selectedCustomer.allow_credit ?? true,
+        defaultCreditTermsDays: Number(selectedCustomer.default_credit_terms_days ?? 30),
+      }
+    : null;
   const editingCartItem = cartItems.find((item) => item.id === editingCartItemId) ?? null;
 
   const addToCart = (product: ProductCard) => {
@@ -931,7 +1006,7 @@ export default function POSPage() {
     setError("");
     const response = await fetch("/api/pos/hold-sale", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(await getAuthHeaders()) },
       body: JSON.stringify({
         branchId: selectedBranchId,
         cashierId: cashierUserId,
@@ -986,12 +1061,17 @@ export default function POSPage() {
     setReceiptState({
       saleId: payload.saleId,
       invoiceNumber: payload.invoiceNumber,
+      issuedAt: new Date().toISOString(),
       payments: payload.payments,
       amountPaid: payload.amountPaid,
       changeAmount: payload.changeAmount,
       customerName: selectedCustomer?.name ?? "Walk-in Customer",
       customerEmail: selectedCustomer?.email ?? null,
       customerPhone: selectedCustomer?.phone ?? null,
+      shopName,
+      shopAddress,
+      shopPhone,
+      shopTaxId,
       items: cartItems.map((item) => ({
         name: item.name,
         sku: item.sku,
@@ -1011,6 +1091,45 @@ export default function POSPage() {
     refreshPosData();
   };
 
+  const handleReprintReceipt = async (saleId: string) => {
+    setReprintingSaleId(saleId);
+    setError("");
+
+    try {
+      const response = await fetch(`/api/pos/receipt?saleId=${encodeURIComponent(saleId)}`, {
+        headers: await getAuthHeaders(),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to load receipt.");
+
+      setReceiptState({
+        saleId: data.saleId,
+        invoiceNumber: data.invoiceNumber,
+        issuedAt: data.issuedAt ?? new Date().toISOString(),
+        payments: data.payments,
+        amountPaid: data.amountPaid,
+        changeAmount: data.changeAmount,
+        customerName: data.customerName,
+        customerEmail: data.customerEmail,
+        customerPhone: data.customerPhone,
+        shopName,
+        shopAddress,
+        shopPhone,
+        shopTaxId,
+        items: data.items,
+        subtotal: data.subtotal,
+        discountAmountTotal: data.discountAmount,
+        taxAmount: data.taxAmount,
+        total: data.total,
+      });
+      setShowReceiptModal(true);
+    } catch (reprintError) {
+      setError(reprintError instanceof Error ? reprintError.message : "Unable to load receipt.");
+    } finally {
+      setReprintingSaleId(null);
+    }
+  };
+
   return (
     <div className="page pos-page">
       <div className="pos-shell">
@@ -1020,9 +1139,10 @@ export default function POSPage() {
               <div className="pos-header__icon">
                 <ShoppingCart size={20} />
               </div>
-              <div>
+              <div className="pos-header__copy">
+                <span className="pos-header__eyebrow">Checkout Workspace</span>
                 <h1 className="pos-header__title">POS / Sales</h1>
-                <p className="pos-header__subtitle">Search by name, SKU, barcode, brand, category, or shelf location</p>
+                <p className="pos-header__subtitle">Scan barcode or search item to start a sale.</p>
               </div>
             </div>
 
@@ -1043,11 +1163,13 @@ export default function POSPage() {
               </div>
               <button type="button" className="pos-btn pos-btn--warn" onClick={() => setShowRecallModal(true)}>
                 <Play size={14} />
-                <span>Held Sales: {heldSalesCount}</span>
+                <span>Hold Sales ({heldSalesCount})</span>
               </button>
               <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowShiftModal(true)}>
                 <Wallet size={14} />
-                <span>{currentShiftId ? "Shift Open" : "Open Shift"}</span>
+                <span>
+                  {currentShiftStatus === "pending_approval" ? "Approve Shift" : currentShiftId ? "Shift Open" : "Open Shift"}
+                </span>
               </button>
               <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowVoidModal(true)}>
                 <Trash2 size={14} />
@@ -1100,6 +1222,12 @@ export default function POSPage() {
             </div>
 
             <div className="pos-tabs" aria-label="Motorparts filters">
+              <select value={selectedBrandFilter} onChange={(event) => setSelectedBrandFilter(event.target.value)}>
+                <option value="all">All Brands</option>
+                {brandFilterOptions.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
               <select value={selectedMotorcycleFilter} onChange={(event) => setSelectedMotorcycleFilter(event.target.value)}>
                 <option value="all">All Motorcycle Models</option>
                 {motorcycleFilterOptions.map((option) => (
@@ -1127,6 +1255,7 @@ export default function POSPage() {
               onClick={() => {
                 setSearchValue("");
                 setSelectedCategoryId("all");
+                setSelectedBrandFilter("all");
                 setSelectedMotorcycleFilter("all");
                 setSelectedEngineFilter("all");
                 setSelectedYearFilter("");
@@ -1179,6 +1308,7 @@ export default function POSPage() {
               <section className="pos-panel pos-panel--recent">
                 <div className="pos-panel__header">
                   <h2 className="pos-panel__title">Recent Items</h2>
+                  <span className="pos-panel__meta">{recentItems.length} loaded</span>
                 </div>
                 <div className="pos-recent-list">
                   {recentItems.length ? (
@@ -1203,7 +1333,7 @@ export default function POSPage() {
                 <section className="pos-panel">
                   <div className="pos-panel__header">
                     <h2 className="pos-panel__title">Recent Transactions</h2>
-                    <span className="pos-panel__link">{recentTransactions.length} loaded</span>
+                    <span className="pos-panel__link">View All</span>
                   </div>
                   <div className="pos-transaction-table">
                     <div className="pos-transaction-table__head">
@@ -1213,6 +1343,7 @@ export default function POSPage() {
                       <span>Payment</span>
                       <span>Cashier</span>
                       <span>Time</span>
+                      <span>Action</span>
                     </div>
                     {recentTransactions.length ? (
                       recentTransactions.map((item) => (
@@ -1223,6 +1354,14 @@ export default function POSPage() {
                           <span>{item.payment}</span>
                           <span>{item.cashier}</span>
                           <span>{item.time}</span>
+                          <button
+                            type="button"
+                            className="pos-btn pos-btn--ghost"
+                            onClick={() => void handleReprintReceipt(item.saleId)}
+                            disabled={reprintingSaleId === item.saleId}
+                          >
+                            {reprintingSaleId === item.saleId ? "Loading..." : "Reprint"}
+                          </button>
                         </div>
                       ))
                     ) : (
@@ -1399,26 +1538,37 @@ export default function POSPage() {
                 {availablePaymentMethods.filter((method) => method !== "split").slice(0, 5).map((method) => {
                   const meta = paymentMethodMeta[method] ?? { label: method.replace(/_/g, " "), className: "pos-pay-chip--other", icon: Tag };
                   const Icon = meta.icon;
-                  const isComingSoon = ["card", "bank_transfer", "customer_credit"].includes(method);
                   return (
-                    <button key={method} type="button" className={`pos-pay-chip ${meta.className}`} title={isComingSoon ? "Coming soon" : "Available now"}>
+                    <button key={method} type="button" className={`pos-pay-chip ${meta.className}`} title="Available payment method">
                       <Icon size={16} />
-                      <span>{meta.label}{isComingSoon ? " Soon" : ""}</span>
+                      <span>{meta.label}</span>
                     </button>
                   );
                 })}
               </div>
 
-              <div className="pos-payment-methods">
+              <div className="pos-payment-methods pos-payment-methods--utility">
                 <button type="button" className="pos-btn pos-btn--ghost" disabled={!cartItems.length} onClick={() => void holdOrder()}>
                   <Play size={14} />
                   <span>Hold Order</span>
                 </button>
               </div>
 
-              <button type="button" className="pos-pay-now" disabled={!cartItems.length} onClick={() => setShowPaymentModal(true)}>
+              <button
+                type="button"
+                className="pos-pay-now"
+                disabled={!cartItems.length || !currentShiftId}
+                onClick={() => {
+                  if (!currentShiftId) {
+                    setShowShiftModal(true);
+                    return;
+                  }
+                  setShowPaymentModal(true);
+                }}
+                title={!currentShiftId ? "Open a cashier shift first." : "Process payment"}
+              >
                 <Wallet size={17} />
-                <span>Pay Now (F9)</span>
+                <span>{currentShiftId ? "Pay Now (F9)" : "Open Shift To Pay"}</span>
               </button>
             </aside>
           </div>
@@ -1429,7 +1579,19 @@ export default function POSPage() {
             <div className="pos-mobile-checkout__label">Cart Total</div>
             <div className="pos-mobile-checkout__value">{formatPeso(total)}</div>
           </div>
-          <button type="button" disabled={!cartItems.length} onClick={() => setShowPaymentModal(true)}>Checkout</button>
+          <button
+            type="button"
+            disabled={!cartItems.length || !currentShiftId}
+            onClick={() => {
+              if (!currentShiftId) {
+                setShowShiftModal(true);
+                return;
+              }
+              setShowPaymentModal(true);
+            }}
+          >
+            {currentShiftId ? "Checkout" : "Open Shift"}
+          </button>
         </div>
 
         {showPaymentModal ? (
@@ -1441,6 +1603,7 @@ export default function POSPage() {
             total={total}
             customerId={selectedCustomer?.id ?? null}
             customerName={selectedCustomer?.name ?? "Walk-in Customer"}
+            customerCredit={selectedCustomerCredit}
             branchId={selectedBranchId}
             cashierId={cashierUserId}
             shiftId={currentShiftId}
@@ -1459,6 +1622,11 @@ export default function POSPage() {
             customerName={receiptState.customerName}
             customerEmail={receiptState.customerEmail}
             customerPhone={receiptState.customerPhone}
+            issuedAt={receiptState.issuedAt}
+            shopName={receiptState.shopName}
+            shopAddress={receiptState.shopAddress}
+            shopPhone={receiptState.shopPhone}
+            shopTaxId={receiptState.shopTaxId}
             items={receiptState.items}
             subtotal={receiptState.subtotal}
             discountAmount={receiptState.discountAmountTotal}
@@ -1509,11 +1677,13 @@ export default function POSPage() {
             branchId={selectedBranchId}
             cashierId={cashierUserId}
             cashierName={cashierName}
-            currentShiftId={currentShiftId}
+            currentShiftId={shiftReviewId}
             expectedCash={expectedCash}
             onClose={() => setShowShiftModal(false)}
             onSuccess={(shiftId) => {
               setCurrentShiftId(shiftId);
+              setShiftReviewId(shiftId);
+              setCurrentShiftStatus(shiftId ? "open" : null);
               setShowShiftModal(false);
               refreshPosData();
             }}

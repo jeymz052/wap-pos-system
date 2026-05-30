@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { parseUserAgentDetails } from "@/lib/auth-security";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -23,6 +24,7 @@ export async function POST(req: NextRequest) {
   const userAgent = req.headers.get("user-agent") ?? "unknown";
   const deviceName = body.device_name ?? "Unknown Device";
   const loginMethod = body.login_method ?? "password";
+  const { browser, os } = parseUserAgentDetails(userAgent);
 
   const { data: profile } = await supabaseAdmin
     .from("users")
@@ -54,7 +56,7 @@ export async function POST(req: NextRequest) {
   if (existing) {
     await supabaseAdmin
       .from("device_sessions")
-      .update({ last_active_at: new Date().toISOString(), is_current: true })
+      .update({ last_active_at: new Date().toISOString(), is_current: true, browser, os, device_name: deviceName, ip_address: ip })
       .eq("id", existing.id);
   } else {
     // Mark all previous sessions as not current
@@ -67,6 +69,8 @@ export async function POST(req: NextRequest) {
       user_id:       profile.id,
       session_token: sessionToken,
       device_name:   deviceName,
+      browser,
+      os,
       ip_address:    ip,
       last_active_at: new Date().toISOString(),
       is_current:    true,

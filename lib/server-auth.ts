@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getAccessProfileByAuthUserId } from "@/lib/user-access";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -27,43 +28,14 @@ export async function getAuthenticatedUser(request: NextRequest): Promise<Authen
 
   const { data: authData, error: authError } = await supabaseAdmin.auth.getUser(token);
   if (authError || !authData.user) return null;
-
-  const { data: profileRow, error: profileError } = await supabaseAdmin
-    .from("users")
-    .select("id, role_id")
-    .eq("auth_id", authData.user.id)
-    .maybeSingle();
-
-  if (profileError || !profileRow) return null;
-
-  const roleId = (profileRow as { role_id?: string | null }).role_id ?? null;
-  const permissions = new Set<string>();
-
-  if (roleId) {
-    const { data: permissionRows, error: permissionError } = await supabaseAdmin
-      .from("role_permissions")
-      .select("is_allowed, permissions(module, action)")
-      .eq("role_id", roleId)
-      .eq("is_allowed", true);
-
-    if (permissionError) {
-      throw permissionError;
-    }
-
-    (permissionRows as Array<{ permissions?: { module?: string | null; action?: string | null } | null }> | null ?? []).forEach((row) => {
-      const moduleName = row.permissions?.module;
-      const action = row.permissions?.action;
-      if (moduleName && action) {
-        permissions.add(`${moduleName}:${action}`);
-      }
-    });
-  }
+  const accessProfile = await getAccessProfileByAuthUserId(authData.user.id);
+  if (!accessProfile) return null;
 
   return {
     authUserId: authData.user.id,
-    profileId: (profileRow as { id: string }).id,
-    roleId,
-    permissions,
+    profileId: accessProfile.profileId,
+    roleId: accessProfile.roleId,
+    permissions: new Set(accessProfile.permissions),
   };
 }
 

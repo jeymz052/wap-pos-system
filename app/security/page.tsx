@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useState, useCallback, type FormEvent } from "react";
+import { Suspense, useEffect, useState, useCallback, type FormEvent } from "react";
+import { useSearchParams } from "next/navigation";
 import {
-  AlertTriangle, CheckCircle, Clock, Eye, EyeOff, Globe,
+  AlertTriangle, CheckCircle, Clock, Eye, EyeOff,
   History, KeyRound, Laptop, Lock, LogOut, Monitor,
   RefreshCw, Shield, ShieldCheck, ShieldOff, Smartphone,
-  Trash2, X,
+  X,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useRbac } from "@/components/RbacProvider";
-import { evaluatePassword, DEFAULT_POLICY } from "@/lib/auth-security";
+import { evaluatePassword, DEFAULT_POLICY, type PasswordPolicy } from "@/lib/auth-security";
+import { normalizeSecurityPolicy } from "@/lib/security-policy";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -40,8 +42,8 @@ type Toast = { id: number; ok: boolean; msg: string };
 
 // ─── Password Strength Bar ─────────────────────────────────────────────────────
 
-function PwStrengthBar({ password }: { password: string }) {
-  const s = evaluatePassword(password);
+function PwStrengthBar({ password, policy }: { password: string; policy: PasswordPolicy }) {
+  const s = evaluatePassword(password, policy);
   if (!password) return null;
   return (
     <div className="pwd-strength">
@@ -58,13 +60,18 @@ function PwStrengthBar({ password }: { password: string }) {
 
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 
-export default function SecurityPage() {
-  const { user, role } = useRbac();
+function SecurityPageContent() {
+  const searchParams = useSearchParams();
+  const { role } = useRbac();
   const isAdmin = role?.name === "super_admin" || role?.name === "admin";
+  const setup2faRequired = searchParams?.get("setup2fa") === "required";
+  const passwordReason = searchParams?.get("reason");
+  const requestedTab = searchParams?.get("tab");
 
-  const [tab, setTab]       = useState<Tab>("history");
+  const [tab, setTab]       = useState<Tab>(requestedTab === "password" || requestedTab === "2fa" || requestedTab === "sessions" || requestedTab === "history" ? requestedTab : "history");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [tid, setTid]       = useState(0);
+  const [securityPolicy, setSecurityPolicy] = useState<PasswordPolicy>(DEFAULT_POLICY);
 
   const toast = useCallback((ok: boolean, msg: string) => {
     const id = tid + 1; setTid(id);
@@ -72,12 +79,23 @@ export default function SecurityPage() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4500);
   }, [tid]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(async () => {
+      const { data, error } = await supabase.rpc("get_password_policy");
+      if (!error) {
+        setSecurityPolicy(normalizeSecurityPolicy((data as Record<string, unknown> | null) ?? null));
+      }
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, []);
+
   // ─── LOGIN HISTORY ──────────────────────────────────────────────────────────
   const [history, setHistory]     = useState<LoginHistoryRow[]>([]);
   const [histLoading, setHistLoading] = useState(false);
   const [histPage, setHistPage]   = useState(1);
   const [histTotal, setHistTotal] = useState(0);
-  const [histUserId, setHistUserId] = useState<string | undefined>(undefined);
+  const [histUserId] = useState<string | undefined>(undefined);
   const HIST_LIMIT = 15;
 
   const loadHistory = useCallback(async (page = 1, userId?: string) => {
@@ -94,7 +112,13 @@ export default function SecurityPage() {
     setHistLoading(false);
   }, []);
 
-  useEffect(() => { if (tab === "history") void loadHistory(histPage, histUserId); }, [tab, histPage, histUserId, loadHistory]);
+  useEffect(() => {
+    if (tab !== "history") return;
+    const timer = window.setTimeout(() => {
+      void loadHistory(histPage, histUserId);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [tab, histPage, histUserId, loadHistory]);
 
   // ─── SESSIONS ──────────────────────────────────────────────────────────────
   const [sessions, setSessions]   = useState<DeviceSession[]>([]);
@@ -111,7 +135,13 @@ export default function SecurityPage() {
     setSessLoading(false);
   }, []);
 
-  useEffect(() => { if (tab === "sessions") void loadSessions(); }, [tab, loadSessions]);
+  useEffect(() => {
+    if (tab !== "sessions") return;
+    const timer = window.setTimeout(() => {
+      void loadSessions();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [tab, loadSessions]);
 
   const revokeSession = async (sessionId: string) => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -151,7 +181,13 @@ export default function SecurityPage() {
     setTwoFaEnabled(json.enabled ?? false);
   }, []);
 
-  useEffect(() => { if (tab === "2fa") void load2FA(); }, [tab, load2FA]);
+  useEffect(() => {
+    if (tab !== "2fa") return;
+    const timer = window.setTimeout(() => {
+      void load2FA();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [tab, load2FA]);
 
   const startEnroll = async () => {
     setTwoFaLoading(true);
@@ -189,7 +225,6 @@ export default function SecurityPage() {
   };
 
   // ─── PASSWORD CHANGE ───────────────────────────────────────────────────────
-  const [pwCurrent, setPwCurrent] = useState("");
   const [pwNew, setPwNew]         = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
   const [showPw, setShowPw]       = useState(false);
@@ -197,14 +232,25 @@ export default function SecurityPage() {
 
   const handlePasswordChange = async (e: FormEvent) => {
     e.preventDefault();
-    const strength = evaluatePassword(pwNew, DEFAULT_POLICY);
+    const strength = evaluatePassword(pwNew, securityPolicy);
     if (strength.issues.length > 0) { toast(false, "Password: " + strength.issues.join(", ")); return; }
     if (pwNew !== pwConfirm) { toast(false, "Passwords do not match."); return; }
     setPwLoading(true);
-    const { error } = await supabase.auth.updateUser({ password: pwNew });
-    if (error) { toast(false, error.message); setPwLoading(false); return; }
+    const { data: { session } } = await supabase.auth.getSession();
+    const response = await fetch("/api/auth/update-password", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session?.access_token ?? ""}`,
+      },
+      body: JSON.stringify({ password: pwNew }),
+    });
+    const payload = (await response.json()) as { error?: string };
+    if (!response.ok) { toast(false, payload.error ?? "Unable to update password."); setPwLoading(false); return; }
     toast(true, "Password updated successfully!");
-    setPwCurrent(""); setPwNew(""); setPwConfirm("");
+    setPwNew(""); setPwConfirm("");
+    window.sessionStorage.removeItem("wap-pos-rbac-cache");
+    window.location.replace("/dashboard");
     setPwLoading(false);
   };
 
@@ -235,6 +281,24 @@ export default function SecurityPage() {
           <p className="sec-page__sub">Manage your login history, sessions, two-factor auth, and password</p>
         </div>
       </div>
+
+      {setup2faRequired && !twoFaEnabled && (
+        <div className="ur-toast ur-toast--err" style={{ marginBottom: 16 }}>
+          <AlertTriangle size={14} />
+          <span>Two-factor authentication is required for admin accounts. Complete setup before continuing.</span>
+        </div>
+      )}
+
+      {(passwordReason === "password_update_required" || passwordReason === "password_expired") && (
+        <div className="ur-toast ur-toast--err" style={{ marginBottom: 16 }}>
+          <AlertTriangle size={14} />
+          <span>
+            {passwordReason === "password_update_required"
+              ? "Your password must be changed before you can continue."
+              : "Your password has expired. Update it to continue using the system."}
+          </span>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="sec-tabs">
@@ -474,9 +538,10 @@ export default function SecurityPage() {
               <p className="sec-pw-req__title">Password requirements:</p>
               <ul className="sec-pw-req__list">
                 {[
-                  { label: `At least ${DEFAULT_POLICY.password_min_length} characters`, ok: pwNew.length >= DEFAULT_POLICY.password_min_length },
-                  { label: "One uppercase letter", ok: /[A-Z]/.test(pwNew) },
-                  { label: "One number",           ok: /[0-9]/.test(pwNew) },
+                  { label: `At least ${securityPolicy.password_min_length} characters`, ok: pwNew.length >= securityPolicy.password_min_length },
+                  { label: "One uppercase letter", ok: !securityPolicy.password_require_uppercase || /[A-Z]/.test(pwNew) },
+                  { label: "One number", ok: !securityPolicy.password_require_number || /[0-9]/.test(pwNew) },
+                  ...(securityPolicy.password_require_symbol ? [{ label: "One special character", ok: /[^A-Za-z0-9]/.test(pwNew) }] : []),
                 ].map(({ label, ok }) => (
                   <li key={label} className={`sec-pw-req__item ${ok ? "sec-pw-req__item--ok" : ""}`}>
                     <span className="sec-pw-req__dot"/>
@@ -513,7 +578,7 @@ export default function SecurityPage() {
                       </button>
                     )}
                   </div>
-                  {id === "input-new-password" && <PwStrengthBar password={val}/>}
+                  {id === "input-new-password" && <PwStrengthBar password={val} policy={securityPolicy} />}
                   {id === "input-confirm-password" && val && pwNew !== val && (
                     <p className="reset-pw__mismatch">Passwords do not match.</p>
                   )}
@@ -544,5 +609,13 @@ export default function SecurityPage() {
         ))}
       </div>
     </div>
+  );
+}
+
+export default function SecurityPage() {
+  return (
+    <Suspense fallback={<div className="page" style={{ padding: "28px 32px 40px" }}>Loading security settings...</div>}>
+      <SecurityPageContent />
+    </Suspense>
   );
 }

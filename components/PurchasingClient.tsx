@@ -1,7 +1,8 @@
 "use client";
 
-import { useDeferredValue, useEffect, useState, startTransition, type ChangeEvent } from "react";
+import { useDeferredValue, useEffect, useState, startTransition, useRef, useCallback, type ChangeEvent } from "react";
 import {
+  AlertTriangle,
   BadgeCheck,
   BellRing,
   CheckCircle2,
@@ -11,9 +12,11 @@ import {
   FileImage,
   FileText,
   Filter,
+  Loader2,
   PackageCheck,
   PackageOpen,
   Plus,
+  Printer,
   Search,
   ShieldCheck,
   ShoppingCart,
@@ -22,8 +25,21 @@ import {
   Upload,
   UserRound,
   Warehouse,
+  X,
+  XCircle,
+  CreditCard,
+  DollarSign,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { useRbac } from "@/components/RbacProvider";
+import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
+import FeatureLockedPanel from "@/components/subscription/FeatureLockedPanel";
+
+/* ------------------------------------------------------------------ */
+/*  Types                                                              */
+/* ------------------------------------------------------------------ */
 
 type Branch = {
   id: string;
@@ -100,6 +116,11 @@ type SupplierPaymentRow = {
   supplier_id: string;
   po_id: string | null;
   amount: number | string;
+  payment_method: string | null;
+  reference_no: string | null;
+  notes: string | null;
+  paid_at: string | null;
+  created_at: string;
 };
 
 type UserProfile = {
@@ -121,6 +142,20 @@ type AlertState = {
   type: "success" | "error";
   text: string;
 } | null;
+
+type ConfirmAction = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  danger?: boolean;
+  onConfirm: () => void;
+} | null;
+
+/* ------------------------------------------------------------------ */
+/*  Constants                                                          */
+/* ------------------------------------------------------------------ */
+
+const ITEMS_PER_PAGE = 10;
 
 const statusTabs = [
   "all",
@@ -165,6 +200,18 @@ const workflow = [
     color: "red",
   },
 ];
+
+const PAYMENT_METHODS = [
+  { value: "cash", label: "Cash" },
+  { value: "bank_transfer", label: "Bank Transfer" },
+  { value: "gcash", label: "GCash" },
+  { value: "credit_card", label: "Credit Card" },
+  { value: "cheque", label: "Cheque" },
+];
+
+/* ------------------------------------------------------------------ */
+/*  Utility helpers                                                    */
+/* ------------------------------------------------------------------ */
 
 const currencyFormatter = new Intl.NumberFormat("en-PH", {
   style: "currency",
@@ -249,10 +296,350 @@ function createEmptyFormItem(product?: Product): FormItem {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Confirmation Modal Component                                       */
+/* ------------------------------------------------------------------ */
+
+function ConfirmModal({
+  action,
+  onClose,
+}: {
+  action: NonNullable<ConfirmAction>;
+  onClose: () => void;
+}) {
+  return (
+    <div className="po-confirm-overlay" onClick={onClose}>
+      <div className="po-confirm-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="po-confirm-modal__icon-wrap">
+          {action.danger ? (
+            <AlertTriangle size={28} className="po-confirm-modal__icon po-confirm-modal__icon--danger" />
+          ) : (
+            <CheckCircle2 size={28} className="po-confirm-modal__icon po-confirm-modal__icon--info" />
+          )}
+        </div>
+        <h3 className="po-confirm-modal__title">{action.title}</h3>
+        <p className="po-confirm-modal__message">{action.message}</p>
+        <div className="po-confirm-modal__actions">
+          <button type="button" className="btn btn--ghost po-confirm-modal__btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className={`btn po-confirm-modal__btn ${action.danger ? "btn--danger" : "btn--primary"}`}
+            onClick={() => {
+              action.onConfirm();
+              onClose();
+            }}
+          >
+            {action.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Payment Modal Component                                            */
+/* ------------------------------------------------------------------ */
+
+function PaymentModal({
+  order,
+  supplier,
+  currentPaid,
+  totalAmount,
+  onSave,
+  onClose,
+  saving,
+}: {
+  order: PurchaseOrderRow;
+  supplier: Supplier | undefined;
+  currentPaid: number;
+  totalAmount: number;
+  onSave: (data: { amount: number; paymentMethod: string; referenceNo: string; notes: string }) => void;
+  onClose: () => void;
+  saving: boolean;
+}) {
+  const [amount, setAmount] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [referenceNo, setReferenceNo] = useState("");
+  const [notes, setNotes] = useState("");
+
+  const balance = Math.max(totalAmount - currentPaid, 0);
+
+  return (
+    <div className="po-confirm-overlay" onClick={onClose}>
+      <div className="po-payment-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="po-payment-modal__header">
+          <div className="po-payment-modal__header-icon">
+            <DollarSign size={20} />
+          </div>
+          <div>
+            <h3>Record Supplier Payment</h3>
+            <p>{order.po_number} — {supplier?.name ?? "Unknown Supplier"}</p>
+          </div>
+          <button type="button" className="po-payment-modal__close" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="po-payment-modal__summary">
+          <div className="po-payment-modal__summary-item">
+            <span>Total Amount</span>
+            <strong>{formatCurrency(totalAmount)}</strong>
+          </div>
+          <div className="po-payment-modal__summary-item">
+            <span>Already Paid</span>
+            <strong>{formatCurrency(currentPaid)}</strong>
+          </div>
+          <div className="po-payment-modal__summary-item po-payment-modal__summary-item--highlight">
+            <span>Balance Due</span>
+            <strong>{formatCurrency(balance)}</strong>
+          </div>
+        </div>
+
+        <div className="po-payment-modal__form">
+          <label className="purchasing-form__field">
+            <span>Payment Amount *</span>
+            <input
+              type="number"
+              className="purchasing-field-control"
+              placeholder="0.00"
+              min="0"
+              step="0.01"
+              max={balance}
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              disabled={saving}
+            />
+          </label>
+
+          <label className="purchasing-form__field">
+            <span>Payment Method</span>
+            <select
+              className="purchasing-field-control"
+              value={paymentMethod}
+              onChange={(e) => setPaymentMethod(e.target.value)}
+              disabled={saving}
+            >
+              {PAYMENT_METHODS.map((pm) => (
+                <option key={pm.value} value={pm.value}>
+                  {pm.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="purchasing-form__field">
+            <span>Reference No.</span>
+            <input
+              type="text"
+              className="purchasing-field-control"
+              placeholder="Check #, GCash ref, etc."
+              value={referenceNo}
+              onChange={(e) => setReferenceNo(e.target.value)}
+              disabled={saving}
+            />
+          </label>
+
+          <label className="purchasing-form__field">
+            <span>Notes</span>
+            <textarea
+              className="purchasing-note-control"
+              placeholder="Optional payment notes..."
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              disabled={saving}
+            />
+          </label>
+        </div>
+
+        <div className="po-payment-modal__actions">
+          <button type="button" className="btn btn--ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={saving || !amount || Number(amount) <= 0 || Number(amount) > balance}
+            onClick={() =>
+              onSave({
+                amount: Number(amount),
+                paymentMethod,
+                referenceNo: referenceNo.trim(),
+                notes: notes.trim(),
+              })
+            }
+          >
+            {saving ? (
+              <>
+                <Loader2 size={14} className="spin" /> Processing...
+              </>
+            ) : (
+              <>
+                <CreditCard size={14} /> Record Payment
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Print PO Component                                                 */
+/* ------------------------------------------------------------------ */
+
+function PrintPO({
+  order,
+  supplier,
+  items,
+  products,
+  subtotal,
+  taxAmount,
+  totalAmount,
+  paidAmount,
+}: {
+  order: PurchaseOrderRow;
+  supplier: Supplier | undefined;
+  items: FormItem[];
+  products: Product[];
+  subtotal: number;
+  taxAmount: number;
+  totalAmount: number;
+  paidAmount: number;
+}) {
+  const getProduct = (id: string) => products.find((p) => p.id === id);
+
+  return (
+    <div className="po-print-area" id="po-print-area">
+      <div className="po-print__header">
+        <div>
+          <h1 className="po-print__company">WAP Motorparts</h1>
+          <p className="po-print__subtitle">Purchase Order</p>
+        </div>
+        <div className="po-print__po-info">
+          <div className="po-print__po-number">{order.po_number}</div>
+          <div className="po-print__po-date">
+            <span>Date:</span> {formatDateLabel(order.created_at)}
+          </div>
+          <div className="po-print__po-status">
+            <span className={statusClass(order.status)}>{formatStatusLabel(order.status)}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="po-print__supplier-info">
+        <div className="po-print__info-block">
+          <h4>Supplier</h4>
+          <p><strong>{supplier?.name ?? "-"}</strong></p>
+          <p>Code: {supplier?.code ?? "-"}</p>
+          <p>Payment Terms: {supplier?.payment_terms ?? 0} days</p>
+        </div>
+        <div className="po-print__info-block">
+          <h4>Order Details</h4>
+          <p>Expected Date: {formatDateLabel(order.expected_date)}</p>
+          <p>Invoice #: {order.supplier_invoice || "-"}</p>
+          {order.approved_at && <p>Approved: {formatDateLabel(order.approved_at)}</p>}
+        </div>
+      </div>
+
+      <table className="po-print__table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Product</th>
+            <th>SKU</th>
+            <th>Qty</th>
+            <th>Unit Cost</th>
+            <th>Amount</th>
+            {order.status !== "draft" && order.status !== "pending_approval" && <th>Received</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item, idx) => {
+            const product = getProduct(item.productId);
+            return (
+              <tr key={item.lineId}>
+                <td>{idx + 1}</td>
+                <td>{product?.name ?? "-"}</td>
+                <td>{product?.sku ?? "-"}</td>
+                <td>{item.quantity}</td>
+                <td>{formatCurrency(item.unitCost)}</td>
+                <td>{formatCurrency(item.quantity * item.unitCost)}</td>
+                {order.status !== "draft" && order.status !== "pending_approval" && (
+                  <td>{item.receivedQty} / {item.quantity}</td>
+                )}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <div className="po-print__totals">
+        <div className="po-print__total-row">
+          <span>Subtotal</span>
+          <strong>{formatCurrency(subtotal)}</strong>
+        </div>
+        <div className="po-print__total-row">
+          <span>VAT (12%)</span>
+          <strong>{formatCurrency(taxAmount)}</strong>
+        </div>
+        <div className="po-print__total-row po-print__total-row--grand">
+          <span>Total Amount</span>
+          <strong>{formatCurrency(totalAmount)}</strong>
+        </div>
+        <div className="po-print__total-row">
+          <span>Amount Paid</span>
+          <strong>{formatCurrency(paidAmount)}</strong>
+        </div>
+        <div className="po-print__total-row">
+          <span>Balance Due</span>
+          <strong>{formatCurrency(Math.max(totalAmount - paidAmount, 0))}</strong>
+        </div>
+      </div>
+
+      {order.notes && (
+        <div className="po-print__notes">
+          <h4>Notes</h4>
+          <p>{order.notes}</p>
+        </div>
+      )}
+
+      <div className="po-print__footer">
+        <div className="po-print__sig-block">
+          <div className="po-print__sig-line" />
+          <span>Prepared by</span>
+        </div>
+        <div className="po-print__sig-block">
+          <div className="po-print__sig-line" />
+          <span>Approved by</span>
+        </div>
+        <div className="po-print__sig-block">
+          <div className="po-print__sig-line" />
+          <span>Received by</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main PurchasingClient Component                                    */
+/* ------------------------------------------------------------------ */
+
 export default function PurchasingClient() {
+  const { canAny } = useRbac();
+  const { loading: subscriptionLoading, hasFeature, requiredPlanFor } = useSubscriptionAccess();
+  const canUsePurchasing = hasFeature("purchase_orders");
+  /* State ---------------------------------------------------------- */
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [alert, setAlert] = useState<AlertState>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [profileUserId, setProfileUserId] = useState("");
   const [selectedBranchId, setSelectedBranchId] = useState("");
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -261,7 +648,7 @@ export default function PurchasingClient() {
   const [lowStock, setLowStock] = useState<LowStockRow[]>([]);
   const [orders, setOrders] = useState<PurchaseOrderRow[]>([]);
   const [orderItems, setOrderItems] = useState<Record<string, PurchaseOrderItemRow[]>>({});
-  const [paymentsByPo, setPaymentsByPo] = useState<Record<string, number>>({});
+  const [paymentListByPo, setPaymentListByPo] = useState<Record<string, SupplierPaymentRow[]>>({});
   const [selectedTab, setSelectedTab] = useState<(typeof statusTabs)[number]>("all");
   const [searchTerm, setSearchTerm] = useState("");
   const [supplierFilterId, setSupplierFilterId] = useState("all");
@@ -274,6 +661,7 @@ export default function PurchasingClient() {
   const [referenceNote, setReferenceNote] = useState("");
   const [supplierInvoice, setSupplierInvoice] = useState("");
   const [attachmentName, setAttachmentName] = useState("");
+  const [attachmentUrl, setAttachmentUrl] = useState("");
   const [formItems, setFormItems] = useState<FormItem[]>([]);
   const [receiveInputs, setReceiveInputs] = useState<Record<string, number>>({});
   const [receiveBatchInputs, setReceiveBatchInputs] = useState<Record<string, string>>({});
@@ -281,13 +669,17 @@ export default function PurchasingClient() {
   const [receiveSerialInputs, setReceiveSerialInputs] = useState<Record<string, string>>({});
   const [receiveDamagedInputs, setReceiveDamagedInputs] = useState<Record<string, number>>({});
   const [receiveReturnedInputs, setReceiveReturnedInputs] = useState<Record<string, number>>({});
+  const [currentPage, setCurrentPage] = useState(1);
   const deferredSearch = useDeferredValue(searchTerm);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  async function getAccessToken() {
+  /* Auth helper ---------------------------------------------------- */
+  const getAccessToken = useCallback(async () => {
     const sessionResult = await supabase.auth.getSession();
     return sessionResult.data.session?.access_token ?? "";
-  }
+  }, []);
 
+  /* Data loading --------------------------------------------------- */
   async function loadInitialContext() {
     setLoading(true);
 
@@ -362,7 +754,7 @@ export default function PurchasingClient() {
         ? supabase.from("purchase_order_items").select("id, po_id, product_id, quantity, received_qty, unit_cost, notes").in("po_id", poIds)
         : Promise.resolve({ data: [], error: null }),
       poIds.length
-        ? supabase.from("supplier_payments").select("id, supplier_id, po_id, amount").in("po_id", poIds)
+        ? supabase.from("supplier_payments").select("id, supplier_id, po_id, amount, payment_method, reference_no, notes, paid_at, created_at").in("po_id", poIds)
         : Promise.resolve({ data: [], error: null }),
     ]);
 
@@ -377,49 +769,39 @@ export default function PurchasingClient() {
       groupedItems[item.po_id] = [...(groupedItems[item.po_id] ?? []), item];
     });
 
-    const paymentSummary: Record<string, number> = {};
+    const paymentList: Record<string, SupplierPaymentRow[]> = {};
     ((paymentsResult.data ?? []) as SupplierPaymentRow[]).forEach((payment) => {
       if (!payment.po_id) return;
-      paymentSummary[payment.po_id] = (paymentSummary[payment.po_id] ?? 0) + parseNumber(payment.amount);
+      paymentList[payment.po_id] = [...(paymentList[payment.po_id] ?? []), payment];
     });
 
     setOrders(orderRows);
     setOrderItems(groupedItems);
-    setPaymentsByPo(paymentSummary);
+    setPaymentListByPo(paymentList);
     setLowStock((lowStockResult.data ?? []) as LowStockRow[]);
     setLoading(false);
   }
 
+  /* Effects -------------------------------------------------------- */
   useEffect(() => {
     let cancelled = false;
-
     const run = async () => {
       await loadInitialContext();
       if (cancelled) return;
     };
-
     void run();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
     if (!selectedBranchId) return;
-
     let cancelled = false;
-
     const run = async () => {
       await loadPurchasingData(selectedBranchId);
       if (cancelled) return;
     };
-
     void run();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [selectedBranchId]);
 
   useEffect(() => {
@@ -452,7 +834,16 @@ export default function PurchasingClient() {
       setExpectedDate(toInputDate(selectedOrder.expected_date));
       setReferenceNote(selectedOrder.notes ?? "");
       setSupplierInvoice(selectedOrder.supplier_invoice ?? "");
-      setAttachmentName(selectedOrder.invoice_image_url?.replace(/^attachment:/, "") ?? "");
+      setAttachmentName(
+        selectedOrder.invoice_image_url?.startsWith("http")
+          ? selectedOrder.invoice_image_url.split("/").pop() ?? ""
+          : selectedOrder.invoice_image_url?.replace(/^attachment:/, "") ?? ""
+      );
+      setAttachmentUrl(
+        selectedOrder.invoice_image_url?.startsWith("http")
+          ? selectedOrder.invoice_image_url
+          : ""
+      );
       setFormItems(selectedItems);
       setReceiveInputs(nextReceiveInputs);
       setReceiveBatchInputs({});
@@ -463,6 +854,7 @@ export default function PurchasingClient() {
     });
   }, [selectedOrderId, orders, orderItems]);
 
+  /* Form helpers --------------------------------------------------- */
   function resetForm() {
     setSelectedOrderId("");
     setSupplierId("");
@@ -471,6 +863,7 @@ export default function PurchasingClient() {
     setReferenceNote("");
     setSupplierInvoice("");
     setAttachmentName("");
+    setAttachmentUrl("");
     setCatalogProductId("");
     setFormItems([]);
     setReceiveInputs({});
@@ -493,6 +886,7 @@ export default function PurchasingClient() {
     return orderItems[orderId] ?? [];
   }
 
+  /* Filtered + paginated orders ------------------------------------ */
   const visibleOrders = orders.filter((order) => {
     const search = deferredSearch.trim().toLowerCase();
     const supplierName = getSupplierById(order.supplier_id)?.name?.toLowerCase() ?? "";
@@ -511,6 +905,11 @@ export default function PurchasingClient() {
     return tabMatch && supplierMatch && statusMatch && searchMatch;
   });
 
+  const totalPages = Math.max(1, Math.ceil(visibleOrders.length / ITEMS_PER_PAGE));
+  const safePage = Math.min(currentPage, totalPages);
+  const pagedOrders = visibleOrders.slice((safePage - 1) * ITEMS_PER_PAGE, safePage * ITEMS_PER_PAGE);
+
+  /* Derived state -------------------------------------------------- */
   const selectedOrder = orders.find((order) => order.id === selectedOrderId) ?? null;
   const selectedSupplier = getSupplierById(supplierId);
   const filteredLowStock = lowStock.filter((item) => {
@@ -562,13 +961,17 @@ export default function PurchasingClient() {
   const subtotal = formItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
   const taxAmount = subtotal * 0.12;
   const totalAmount = subtotal + taxAmount;
-  const paidAmount = selectedOrder ? parseNumber(selectedOrder.paid_amount) + (paymentsByPo[selectedOrder.id] ?? 0) : 0;
+  const paidAmount = selectedOrder ? parseNumber(selectedOrder.paid_amount) : 0;
   const balanceAmount = Math.max(totalAmount - paidAmount, 0);
   const canEditSelectedOrder = selectedOrder ? !["fully_received", "cancelled"].includes(selectedOrder.status) : true;
-  const canApprove = selectedOrder?.status === "pending_approval";
-  const canMarkOrdered = selectedOrder?.status === "approved";
+  const canApproveWorkflow = canAny("purchasing:approve", "purchasing:manage");
+  const canApprove = selectedOrder?.status === "pending_approval" && canApproveWorkflow;
+  const canMarkOrdered = selectedOrder?.status === "approved" && canAny("purchasing:edit", "purchasing:approve", "purchasing:manage");
   const canReceive = selectedOrder ? ["approved", "ordered", "partially_received"].includes(selectedOrder.status) : false;
+  const canCancel = selectedOrder ? ["draft", "pending_approval", "approved"].includes(selectedOrder.status) : false;
+  const canRecordPayment = selectedOrder ? !["draft", "cancelled"].includes(selectedOrder.status) && balanceAmount > 0 : false;
 
+  /* Actions -------------------------------------------------------- */
   function setFormMessage(nextAlert: AlertState) {
     setAlert(nextAlert);
     if (nextAlert) {
@@ -633,6 +1036,45 @@ export default function PurchasingClient() {
     setFormItems((current) => current.filter((item) => item.lineId !== lineId));
   }
 
+  /* Upload invoice ------------------------------------------------- */
+  async function handleAttachmentUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setAttachmentName(file.name);
+
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Session expired. Please sign in again.");
+
+      const formData = new FormData();
+      formData.append("file", file);
+      if (selectedOrderId) formData.append("poId", selectedOrderId);
+
+      const response = await fetch("/api/inventory/upload-invoice", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Upload failed.");
+
+      setAttachmentUrl(result.url);
+      setFormMessage({ type: "success", text: `Invoice file "${file.name}" uploaded successfully.` });
+    } catch (error) {
+      console.error("[Purchasing] upload failed:", error);
+      setAttachmentName("");
+      setAttachmentUrl("");
+      setFormMessage({ type: "error", text: error instanceof Error ? error.message : "Upload failed." });
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  /* Save PO -------------------------------------------------------- */
   async function savePurchaseOrder(nextStatus: "draft" | "pending_approval") {
     if (!selectedBranchId) {
       setFormMessage({ type: "error", text: "Please select a branch before saving a purchase order." });
@@ -651,13 +1093,15 @@ export default function PurchasingClient() {
 
     setSaving(true);
 
+    const invoiceUrl = attachmentUrl || (attachmentName ? `attachment:${attachmentName}` : null);
+
     const payload = {
       supplier_id: supplierId,
       branch_id: selectedBranchId,
       status: nextStatus,
       expected_date: expectedDate || null,
       supplier_invoice: supplierInvoice.trim() || null,
-      invoice_image_url: attachmentName ? `attachment:${attachmentName}` : null,
+      invoice_image_url: invoiceUrl,
       subtotal,
       discount_amount: 0,
       tax_amount: taxAmount,
@@ -716,6 +1160,7 @@ export default function PurchasingClient() {
     }
   }
 
+  /* Approve / Mark Ordered ----------------------------------------- */
   async function approveOrOrderPurchaseOrder() {
     if (!selectedOrder) return;
     setSaving(true);
@@ -741,6 +1186,28 @@ export default function PurchasingClient() {
     });
   }
 
+  /* Cancel PO ------------------------------------------------------ */
+  async function cancelPurchaseOrder() {
+    if (!selectedOrder) return;
+    setSaving(true);
+
+    const result = await supabase
+      .from("purchase_orders")
+      .update({ status: "cancelled" })
+      .eq("id", selectedOrder.id);
+
+    setSaving(false);
+
+    if (result.error) {
+      setFormMessage({ type: "error", text: "Unable to cancel the purchase order." });
+      return;
+    }
+
+    await loadPurchasingData(selectedBranchId);
+    setFormMessage({ type: "success", text: "Purchase order cancelled." });
+  }
+
+  /* Record Receiving ----------------------------------------------- */
   async function recordReceiving() {
     if (!selectedOrder) return;
 
@@ -784,7 +1251,7 @@ export default function PurchasingClient() {
           purchaseOrderId: selectedOrder.id,
           branchId: selectedOrder.branch_id,
           supplierInvoice,
-          invoiceImageUrl: attachmentName ? `attachment:${attachmentName}` : selectedOrder.invoice_image_url,
+          invoiceImageUrl: attachmentUrl || (attachmentName ? `attachment:${attachmentName}` : selectedOrder.invoice_image_url),
           notes: referenceNote,
           entries: receiveEntries.map(({ item, receiveNow }) => ({
             poItemId: item.id,
@@ -827,13 +1294,105 @@ export default function PurchasingClient() {
     }
   }
 
-  function handleAttachmentChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    setAttachmentName(file?.name ?? "");
+  /* Record Payment ------------------------------------------------- */
+  async function recordSupplierPayment(data: { amount: number; paymentMethod: string; referenceNo: string; notes: string }) {
+    if (!selectedOrder) return;
+    setSaving(true);
+
+    try {
+      const insertResult = await supabase.from("supplier_payments").insert({
+        supplier_id: selectedOrder.supplier_id,
+        po_id: selectedOrder.id,
+        amount: data.amount,
+        payment_method: data.paymentMethod,
+        reference_no: data.referenceNo || null,
+        notes: data.notes || null,
+        created_by: profileUserId || null,
+      });
+
+      if (insertResult.error) throw insertResult.error;
+
+      const newPaid = parseNumber(selectedOrder.paid_amount) + data.amount;
+      await supabase
+        .from("purchase_orders")
+        .update({ paid_amount: newPaid })
+        .eq("id", selectedOrder.id);
+
+      await loadPurchasingData(selectedBranchId);
+      setShowPaymentModal(false);
+      setFormMessage({ type: "success", text: `Payment of ${formatCurrency(data.amount)} recorded successfully.` });
+    } catch (error) {
+      console.error("[Purchasing] recordSupplierPayment failed:", error);
+      setFormMessage({ type: "error", text: "Unable to record payment. Please try again." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /* Print ---------------------------------------------------------- */
+  function handlePrint() {
+    window.print();
+  }
+
+  /* Pagination helpers --------------------------------------------- */
+  function getPageNumbers() {
+    const pages: number[] = [];
+    const maxVisible = 5;
+    let start = Math.max(1, safePage - Math.floor(maxVisible / 2));
+    const end = Math.min(totalPages, start + maxVisible - 1);
+    start = Math.max(1, end - maxVisible + 1);
+    for (let i = start; i <= end; i++) pages.push(i);
+    return pages;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /*  RENDER                                                           */
+  /* ---------------------------------------------------------------- */
+
+  if (!subscriptionLoading && !canUsePurchasing) {
+    return (
+      <FeatureLockedPanel
+        featureName="Purchase Orders"
+        requiredPlan={requiredPlanFor("purchase_orders")}
+        description="Purchasing, stock receiving, and supplier order workflows are locked on the current plan."
+      />
+    );
   }
 
   return (
     <div className="page purchasing-page">
+      {/* Print area (hidden on screen) */}
+      {selectedOrder && (
+        <PrintPO
+          order={selectedOrder}
+          supplier={selectedSupplier}
+          items={formItems}
+          products={products}
+          subtotal={subtotal}
+          taxAmount={taxAmount}
+          totalAmount={totalAmount}
+          paidAmount={paidAmount}
+        />
+      )}
+
+      {/* Confirmation Modal */}
+      {confirmAction && (
+        <ConfirmModal action={confirmAction} onClose={() => setConfirmAction(null)} />
+      )}
+
+      {/* Payment Modal */}
+      {showPaymentModal && selectedOrder && (
+        <PaymentModal
+          order={selectedOrder}
+          supplier={selectedSupplier}
+          currentPaid={paidAmount}
+          totalAmount={totalAmount}
+          onSave={recordSupplierPayment}
+          onClose={() => setShowPaymentModal(false)}
+          saving={saving}
+        />
+      )}
+
       <div className="purchasing-header">
         <div className="purchasing-header__copy">
           <div className="purchasing-header__title-row">
@@ -909,7 +1468,10 @@ export default function PurchasingClient() {
                 key={tab}
                 type="button"
                 className={`purchasing-tab ${selectedTab === tab ? "purchasing-tab--active" : ""}`}
-                onClick={() => setSelectedTab(tab)}
+                onClick={() => {
+                  setSelectedTab(tab);
+                  setCurrentPage(1);
+                }}
               >
                 {tab === "all" ? "All Purchase Orders" : formatStatusLabel(tab)}
               </button>
@@ -932,7 +1494,10 @@ export default function PurchasingClient() {
             <select
               className="purchasing-field-control"
               value={supplierFilterId}
-              onChange={(event) => setSupplierFilterId(event.target.value)}
+              onChange={(event) => {
+                setSupplierFilterId(event.target.value);
+                setCurrentPage(1);
+              }}
             >
               <option value="all">All Suppliers</option>
               {suppliers.map((supplier) => (
@@ -945,7 +1510,10 @@ export default function PurchasingClient() {
             <select
               className="purchasing-field-control"
               value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
+              onChange={(event) => {
+                setStatusFilter(event.target.value);
+                setCurrentPage(1);
+              }}
             >
               <option value="all">All Status</option>
               {statusTabs.filter((tab) => tab !== "all").map((tab) => (
@@ -959,7 +1527,10 @@ export default function PurchasingClient() {
               <Search size={14} />
               <input
                 value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
+                onChange={(event) => {
+                  setSearchTerm(event.target.value);
+                  setCurrentPage(1);
+                }}
                 placeholder="Search PO#, supplier, or item..."
               />
             </label>
@@ -985,15 +1556,17 @@ export default function PurchasingClient() {
                 </tr>
               </thead>
               <tbody>
-                {visibleOrders.map((order) => {
+                {pagedOrders.map((order) => {
                   const items = getItemsForOrder(order.id);
                   const totalOrderedQty = items.reduce((sum, item) => sum + item.quantity, 0);
                   const totalReceivedQty = items.reduce((sum, item) => sum + (item.received_qty ?? 0), 0);
                   const receivePercent = totalOrderedQty > 0 ? Math.round((totalReceivedQty / totalOrderedQty) * 100) : 0;
 
                   return (
-                    <tr key={order.id}>
-                      <td className="purchase-table__link">{order.po_number}</td>
+                    <tr key={order.id} className={selectedOrderId === order.id ? "purchase-table__row--selected" : ""}>
+                      <td className="purchase-table__link" onClick={() => setSelectedOrderId(order.id)} style={{ cursor: "pointer" }}>
+                        {order.po_number}
+                      </td>
                       <td>{getSupplierById(order.supplier_id)?.name ?? "-"}</td>
                       <td>{formatDateLabel(order.created_at)}</td>
                       <td>{formatDateLabel(order.expected_date)}</td>
@@ -1001,15 +1574,21 @@ export default function PurchasingClient() {
                       <td>
                         <span className={statusClass(order.status)}>{formatStatusLabel(order.status)}</span>
                       </td>
-                      <td>{receivePercent}%</td>
+                      <td>
+                        <div className="purchase-table__receive-bar">
+                          <div className="purchase-table__receive-fill" style={{ width: `${receivePercent}%` }} />
+                          <span>{receivePercent}%</span>
+                        </div>
+                      </td>
                       <td>
                         <div className="purchase-table__actions">
-                          <button type="button" aria-label={`View ${order.po_number}`} onClick={() => setSelectedOrderId(order.id)}>
+                          <button type="button" aria-label={`View ${order.po_number}`} title="View" onClick={() => setSelectedOrderId(order.id)}>
                             <Eye size={14} />
                           </button>
                           <button
                             type="button"
                             aria-label={`Receive ${order.po_number}`}
+                            title="Receive"
                             onClick={() => setSelectedOrderId(order.id)}
                           >
                             <PackageOpen size={14} />
@@ -1017,6 +1596,7 @@ export default function PurchasingClient() {
                           <button
                             type="button"
                             aria-label={`Advance ${order.po_number}`}
+                            title="Approve"
                             onClick={() => setSelectedOrderId(order.id)}
                           >
                             <ShieldCheck size={14} />
@@ -1026,7 +1606,7 @@ export default function PurchasingClient() {
                     </tr>
                   );
                 })}
-                {visibleOrders.length === 0 && (
+                {pagedOrders.length === 0 && (
                   <tr>
                     <td colSpan={8} className="purchase-table__empty">
                       No purchase orders matched your current filters.
@@ -1037,13 +1617,36 @@ export default function PurchasingClient() {
             </table>
           </div>
 
+          {/* Functional Pagination */}
           <div className="purchasing-board__footer">
-            <span>Showing {visibleOrders.length} of {orders.length} purchase orders</span>
+            <span>Showing {(safePage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(safePage * ITEMS_PER_PAGE, visibleOrders.length)} of {visibleOrders.length} purchase orders</span>
             <div className="purchasing-pagination">
-              <button type="button">1</button>
-              <button type="button" className="is-active">2</button>
-              <button type="button">3</button>
-              <button type="button">4</button>
+              <button
+                type="button"
+                disabled={safePage <= 1}
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                title="Previous page"
+              >
+                <ChevronLeft size={14} />
+              </button>
+              {getPageNumbers().map((page) => (
+                <button
+                  key={page}
+                  type="button"
+                  className={safePage === page ? "is-active" : ""}
+                  onClick={() => setCurrentPage(page)}
+                >
+                  {page}
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={safePage >= totalPages}
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                title="Next page"
+              >
+                <ChevronRight size={14} />
+              </button>
             </div>
             <button type="button" className="purchasing-filter">
               <span>{branches.find((branch) => branch.id === selectedBranchId)?.name ?? "Select Branch"}</span>
@@ -1109,16 +1712,24 @@ export default function PurchasingClient() {
           </section>
         </section>
 
+        {/* ======= FORM SIDEBAR ======= */}
         <aside className="table-card purchasing-form-card">
           <div className="table-card__header">
             <span className="table-card__title">
               {selectedOrder ? `Purchase Order ${selectedOrder.po_number}` : "New Purchase Order"}
             </span>
-            {selectedOrder && (
-              <button type="button" className="purchasing-link-button" onClick={resetForm}>
-                New PO
-              </button>
-            )}
+            <div className="purchasing-form-card__header-actions">
+              {selectedOrder && (
+                <button type="button" className="purchasing-link-button" onClick={handlePrint} title="Print PO">
+                  <Printer size={14} />
+                </button>
+              )}
+              {selectedOrder && (
+                <button type="button" className="purchasing-link-button" onClick={resetForm}>
+                  New PO
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="purchasing-form">
@@ -1175,6 +1786,7 @@ export default function PurchasingClient() {
               </label>
             </div>
 
+            {/* Low Stock Suggestions */}
             <div className="purchasing-form__section">
               <div className="purchasing-form__section-header">
                 <h2>Low-Stock Suggestions</h2>
@@ -1199,6 +1811,7 @@ export default function PurchasingClient() {
               </div>
             </div>
 
+            {/* Items */}
             <div className="purchasing-form__section">
               <div className="purchasing-form__section-header purchasing-form__section-header--inline">
                 <h2>Items</h2>
@@ -1380,6 +1993,7 @@ export default function PurchasingClient() {
               </div>
             </div>
 
+            {/* Receiving & Invoice */}
             <div className="purchasing-form__section">
               <div className="purchasing-form__section-header">
                 <h2>Receiving & Invoice</h2>
@@ -1424,26 +2038,52 @@ export default function PurchasingClient() {
                 </label>
               </div>
 
+              {/* Invoice Attachment with real upload */}
               <div className="purchase-attachments">
                 <label className="purchase-attachments__card purchase-attachments__card--clickable">
-                  <Upload size={16} />
+                  {uploading ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}
                   <div>
-                    <strong>Attach Invoice Image / PDF</strong>
-                    <span>{attachmentName || "Choose an invoice file for this PO"}</span>
+                    <strong>{uploading ? "Uploading..." : "Attach Invoice Image / PDF"}</strong>
+                    <span>{attachmentName || "Choose an invoice file for this PO (max 10MB)"}</span>
                   </div>
-                  <input type="file" accept="image/*,.pdf" hidden onChange={handleAttachmentChange} />
+                  <input ref={fileInputRef} type="file" accept="image/*,.pdf" hidden onChange={handleAttachmentUpload} disabled={uploading} />
                 </label>
                 {attachmentName && (
                   <div className="purchase-attachments__list">
                     <div className="purchase-attachments__file">
                       {attachmentName.toLowerCase().endsWith(".pdf") ? <FileText size={15} /> : <FileImage size={15} />}
                       <span>{attachmentName}</span>
+                      {attachmentUrl && (
+                        <a href={attachmentUrl} target="_blank" rel="noopener noreferrer" className="purchase-attachments__view-link">
+                          <Eye size={12} /> View
+                        </a>
+                      )}
                     </div>
                   </div>
                 )}
               </div>
+
+              {/* Payment History */}
+              {selectedOrder && (paymentListByPo[selectedOrder.id] ?? []).length > 0 && (
+                <div className="po-payment-history">
+                  <h3 className="po-payment-history__title">Payment History</h3>
+                  {(paymentListByPo[selectedOrder.id] ?? []).map((payment) => (
+                    <div key={payment.id} className="po-payment-history__row">
+                      <div>
+                        <strong>{formatCurrency(parseNumber(payment.amount))}</strong>
+                        <span>{payment.payment_method ? formatStatusLabel(payment.payment_method) : "Cash"}</span>
+                      </div>
+                      <div className="po-payment-history__meta">
+                        <span>{formatDateLabel(payment.paid_at || payment.created_at)}</span>
+                        {payment.reference_no && <span>Ref: {payment.reference_no}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
+            {/* Summary */}
             <div className="purchase-summary">
               <div className="purchase-summary__row">
                 <span>Subtotal</span>
@@ -1463,15 +2103,70 @@ export default function PurchasingClient() {
               </div>
             </div>
 
+            {/* Action buttons */}
             <div className="purchase-actions purchase-actions--stack">
               {(canApprove || canMarkOrdered) && (
-                <button type="button" className="btn btn--ghost purchase-actions__button" onClick={approveOrOrderPurchaseOrder} disabled={saving}>
+                <button
+                  type="button"
+                  className="btn btn--ghost purchase-actions__button"
+                  onClick={() =>
+                    setConfirmAction({
+                      title: canApprove ? "Approve Purchase Order" : "Mark as Ordered",
+                      message: canApprove
+                        ? `Are you sure you want to approve ${selectedOrder?.po_number}? This will allow it to be ordered and received.`
+                        : `Mark ${selectedOrder?.po_number} as ordered? This confirms the order has been placed with the supplier.`,
+                      confirmLabel: canApprove ? "Approve" : "Mark Ordered",
+                      onConfirm: approveOrOrderPurchaseOrder,
+                    })
+                  }
+                  disabled={saving}
+                >
                   {canApprove ? "Approve PO" : "Mark as Ordered"}
                 </button>
               )}
               {canReceive && (
-                <button type="button" className="btn btn--ghost purchase-actions__button" onClick={recordReceiving} disabled={saving}>
+                <button
+                  type="button"
+                  className="btn btn--ghost purchase-actions__button"
+                  onClick={() =>
+                    setConfirmAction({
+                      title: "Record Receiving",
+                      message: "This will update inventory stock levels and record the received quantities. Continue?",
+                      confirmLabel: "Record Receiving",
+                      onConfirm: recordReceiving,
+                    })
+                  }
+                  disabled={saving}
+                >
                   Record Receiving
+                </button>
+              )}
+              {canRecordPayment && (
+                <button
+                  type="button"
+                  className="btn btn--ghost purchase-actions__button purchase-actions__button--payment"
+                  onClick={() => setShowPaymentModal(true)}
+                  disabled={saving}
+                >
+                  <CreditCard size={14} /> Record Payment
+                </button>
+              )}
+              {canCancel && (
+                <button
+                  type="button"
+                  className="btn btn--ghost purchase-actions__button purchase-actions__button--danger"
+                  onClick={() =>
+                    setConfirmAction({
+                      title: "Cancel Purchase Order",
+                      message: `Are you sure you want to cancel ${selectedOrder?.po_number}? This action cannot be undone.`,
+                      confirmLabel: "Cancel PO",
+                      danger: true,
+                      onConfirm: cancelPurchaseOrder,
+                    })
+                  }
+                  disabled={saving}
+                >
+                  <XCircle size={14} /> Cancel PO
                 </button>
               )}
               <button type="button" className="btn btn--ghost purchase-actions__button" onClick={() => savePurchaseOrder("draft")} disabled={saving || !canEditSelectedOrder}>

@@ -1,477 +1,970 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, BarChart, Bar, Legend,
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from 'recharts';
 import {
-  TrendingUp, Package, DollarSign, FileText, Download, Printer,
-  BarChart2, ArrowUpRight, ArrowDownRight, ChevronRight,
-  ShoppingCart, RefreshCw, Calendar, Filter, FileSpreadsheet,
+  BadgeDollarSign,
+  Boxes,
+  Building2,
+  Calendar,
+  ChartColumn,
+  CircleAlert,
+  Clock3,
+  CreditCard,
+  Download,
+  FileSpreadsheet,
+  Filter,
+  LoaderCircle,
+  Package,
+  Printer,
+  Receipt,
+  RefreshCw,
+  Save,
+  Search,
+  Send,
+  Trash2,
+  TrendingUp,
+  Wallet,
 } from 'lucide-react';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
+import {
+  loadReportsAnalytics,
+  type ReportColumn,
+  type ReportGroup,
+  type ReportPreset,
+  type ReportsAnalyticsData,
+  type ReportSchedule,
+  type ReportScheduleRun,
+  type ReportTable,
+} from '@/lib/reports';
 
-const fmt = (n: number) =>
-  '₱' + n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const CURRENCY = new Intl.NumberFormat('en-PH', {
+  style: 'currency',
+  currency: 'PHP',
+  minimumFractionDigits: 2,
+});
+const NUMBER = new Intl.NumberFormat('en-PH');
+const PERCENT = new Intl.NumberFormat('en-PH', {
+  style: 'percent',
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+const PIE_COLORS = ['#2563eb', '#0f766e', '#f59e0b', '#7c3aed', '#dc2626', '#1d4ed8'];
 
-const pct = (n: number) => (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
+const GROUP_META: Record<
+  ReportGroup,
+  {
+    title: string;
+    eyebrow: string;
+    description: string;
+    icon: typeof TrendingUp;
+  }
+> = {
+  sales: {
+    title: 'Sales Reports',
+    eyebrow: 'Module 14',
+    description: 'Daily, monthly, cashier, branch, category, brand, product, payment, discount, and refund reporting.',
+    icon: TrendingUp,
+  },
+  inventory: {
+    title: 'Inventory Reports',
+    eyebrow: 'Module 14',
+    description: 'Stock position, valuation, movement, adjustments, and velocity monitoring from one workspace.',
+    icon: Package,
+  },
+  financial: {
+    title: 'Financial Reports',
+    eyebrow: 'Module 14',
+    description: 'Gross sales, net sales, profit, expenses, receivables, payables, and cash drawer accountability.',
+    icon: BadgeDollarSign,
+  },
+};
 
-const PIE_COLORS = ['#1e88e5','#f59e0b','#22c55e','#a855f7','#ef4444','#64748b'];
+function formatCurrency(value: number) {
+  return CURRENCY.format(value).replace('PHP', 'P');
+}
 
-type MonthlySale = { month: string; sales: number; purchases: number };
-type CategorySale = { name: string; value: number };
-type TopProduct = { sku: string; name: string; category: string; qty: number; total: number };
-type PaymentBreakdown = { method: string; amount: number; pct: number };
-type PnLRow = { label: string; amount: number; highlight?: boolean };
+function formatCell(column: ReportColumn, value: string | number | null | undefined) {
+  if (value === null || value === undefined || value === '') return '-';
+  if (column.type === 'currency') return formatCurrency(Number(value));
+  if (column.type === 'number') return NUMBER.format(Number(value));
+  if (column.type === 'percent') return PERCENT.format(Number(value));
+  if (column.type === 'date') {
+    return new Intl.DateTimeFormat('en-PH', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(new Date(String(value)));
+  }
+  if (column.type === 'datetime') {
+    return new Intl.DateTimeFormat('en-PH', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(new Date(String(value)));
+  }
+  return String(value);
+}
+
+function rowsToMatrix(report: ReportTable, rows: Record<string, string | number | null>[]) {
+  return rows.map((row) => report.columns.map((column) => formatCell(column, row[column.key])));
+}
+
+function exportRowsAsCsv(report: ReportTable, rows: Record<string, string | number | null>[]) {
+  const headers = report.columns.map((column) => column.label);
+  const body = rowsToMatrix(report, rows).map((line) =>
+    line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`),
+  );
+  const csv = [headers.join(','), ...body.map((line) => line.join(','))].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${report.id}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportRowsAsXlsx(report: ReportTable, rows: Record<string, string | number | null>[]) {
+  const matrix = [report.columns.map((column) => column.label), ...rowsToMatrix(report, rows)];
+  const worksheet = XLSX.utils.aoa_to_sheet(matrix);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Report');
+  XLSX.writeFile(workbook, `${report.id}.xlsx`);
+}
+
+function exportRowsAsPdf(report: ReportTable, rows: Record<string, string | number | null>[]) {
+  const doc = new jsPDF({
+    orientation: report.columns.length > 7 ? 'landscape' : 'portrait',
+    unit: 'pt',
+    format: 'a4',
+  });
+
+  doc.setFontSize(16);
+  doc.text(report.title, 40, 40);
+  doc.setFontSize(10);
+  doc.text(report.description, 40, 58);
+
+  autoTable(doc, {
+    startY: 76,
+    head: [report.columns.map((column) => column.label)],
+    body: rowsToMatrix(report, rows),
+    styles: {
+      fontSize: 8,
+      cellPadding: 5,
+    },
+    headStyles: {
+      fillColor: [37, 99, 235],
+    },
+    margin: { left: 24, right: 24 },
+  });
+
+  doc.save(`${report.id}.pdf`);
+}
+
+function EmptyPanel({ message }: { message: string }) {
+  return <div className="ra14-empty">{message}</div>;
+}
+
+function BreakdownCard({
+  title,
+  icon: Icon,
+  children,
+}: {
+  title: string;
+  icon: typeof TrendingUp;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="ra14-panel">
+      <div className="ra14-panel__head">
+        <div className="ra14-panel__title-wrap">
+          <span className="ra14-panel__icon"><Icon size={15} /></span>
+          <span className="ra14-panel__title">{title}</span>
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
 
 export default function ReportsClient() {
   const [loading, setLoading] = useState(true);
-  const [branches, setBranches] = useState<{id:string;name:string}[]>([]);
-  const [branchId, setBranchId] = useState('all');
-  const [dateFrom, setDateFrom] = useState(() => {
-    const d = new Date(); d.setDate(1); return d.toISOString().slice(0,10);
+  const [metaLoading, setMetaLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [data, setData] = useState<ReportsAnalyticsData | null>(null);
+  const [presets, setPresets] = useState<ReportPreset[]>([]);
+  const [schedules, setSchedules] = useState<ReportSchedule[]>([]);
+  const [runs, setRuns] = useState<ReportScheduleRun[]>([]);
+  const [branchId, setBranchId] = useState(() => {
+    if (typeof window === 'undefined') return 'all';
+    return window.localStorage.getItem('active_branch_id') || 'all';
   });
-  const [dateTo, setDateTo] = useState(() => new Date().toISOString().slice(0,10));
+  const [dateFrom, setDateFrom] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  });
+  const [dateTo, setDateTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [activeGroup, setActiveGroup] = useState<ReportGroup>('sales');
+  const [activeReportId, setActiveReportId] = useState('daily-sales');
+  const [search, setSearch] = useState('');
+  const [presetName, setPresetName] = useState('');
+  const [presetDescription, setPresetDescription] = useState('');
+  const [schedulePresetId, setSchedulePresetId] = useState('');
+  const [scheduleName, setScheduleName] = useState('');
+  const [scheduleFrequency, setScheduleFrequency] = useState<'daily' | 'weekly' | 'monthly'>('weekly');
+  const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState('1');
+  const [scheduleDayOfMonth, setScheduleDayOfMonth] = useState('1');
+  const [scheduleRunTime, setScheduleRunTime] = useState('08:00');
+  const [scheduleFormat, setScheduleFormat] = useState<'pdf' | 'xlsx' | 'csv'>('pdf');
+  const [scheduleDelivery, setScheduleDelivery] = useState<'download_center' | 'email'>('download_center');
+  const [scheduleRecipients, setScheduleRecipients] = useState('');
 
-  // KPIs
-  const [totalSales, setTotalSales] = useState(0);
-  const [totalPurchases, setTotalPurchases] = useState(0);
-  const [grossProfit, setGrossProfit] = useState(0);
-  const [netProfit, setNetProfit] = useState(0);
-  const [totalReceivables, setTotalReceivables] = useState(0);
-  const [totalPayables, setTotalPayables] = useState(0);
-  const [prevSales, setPrevSales] = useState(0);
+  async function getAuthHeaders() {
+    const sessionResult = await supabase.auth.getSession();
+    const token = sessionResult.data.session?.access_token;
+    if (!token) throw new Error('Please sign in again to manage report presets and schedules.');
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+  }
 
-  // Charts
-  const [monthlySales, setMonthlySales] = useState<MonthlySale[]>([]);
-  const [categorySales, setCategorySales] = useState<CategorySale[]>([]);
-  const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
-  const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
-  const [pnl, setPnl] = useState<PnLRow[]>([]);
-
-  const load = useCallback(async () => {
+  async function loadAnalytics() {
     setLoading(true);
-    const from = new Date(dateFrom).toISOString();
-    const to = new Date(dateTo + 'T23:59:59').toISOString();
-
-    // Previous period for comparison
-    const diffMs = new Date(to).getTime() - new Date(from).getTime();
-    const prevFrom = new Date(new Date(from).getTime() - diffMs).toISOString();
-    const prevTo = from;
-
-    let salesQ = supabase.from('sales').select('id,total_amount,subtotal,discount_amount,tax_amount,created_at,status').eq('status','completed').gte('created_at',from).lte('created_at',to);
-    let prevSalesQ = supabase.from('sales').select('total_amount').eq('status','completed').gte('created_at',prevFrom).lte('created_at',prevTo);
-    let poQ = supabase.from('purchase_orders').select('total_amount,created_at').not('status','in','(draft,cancelled)').gte('created_at',from).lte('created_at',to);
-
-    if (branchId !== 'all') {
-      salesQ = salesQ.eq('branch_id', branchId);
-      prevSalesQ = prevSalesQ.eq('branch_id', branchId);
-      poQ = poQ.eq('branch_id', branchId);
+    setError('');
+    try {
+      const next = await loadReportsAnalytics({ branchId, dateFrom, dateTo });
+      setData(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load reports.');
+    } finally {
+      setLoading(false);
     }
+  }
 
-    const [salesRes, prevSalesRes, poRes, recRes, payRes, branchRes] = await Promise.all([
-      salesQ,
-      prevSalesQ,
-      poQ,
-      supabase.from('receivables').select('balance').neq('status','paid'),
-      supabase.from('suppliers').select('current_balance'),
-      supabase.from('branches').select('id,name').eq('is_active',true),
-    ]);
+  async function loadMeta() {
+    setMetaLoading(true);
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetch('/api/reports', { headers });
+      const payload = (await response.json()) as {
+        error?: string;
+        presets?: ReportPreset[];
+        schedules?: ReportSchedule[];
+        runs?: ReportScheduleRun[];
+      };
+      if (!response.ok) throw new Error(payload.error || 'Unable to load report presets.');
+      setPresets(payload.presets ?? []);
+      setSchedules(payload.schedules ?? []);
+      setRuns(payload.runs ?? []);
+      setSchedulePresetId((current) => current || payload.presets?.[0]?.id || '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load report metadata.');
+    } finally {
+      setMetaLoading(false);
+    }
+  }
 
-    setBranches(branchRes.data ?? []);
+  async function postReportsAction(body: unknown) {
+    const headers = await getAuthHeaders();
+    const response = await fetch('/api/reports', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    const payload = (await response.json()) as { error?: string; message?: string };
+    if (!response.ok) throw new Error(payload.error || 'Report action failed.');
+    if (payload.message) setNotice(payload.message);
+    await loadMeta();
+  }
 
-    const salesRows = salesRes.data ?? [];
-    const poRows = poRes.data ?? [];
-    const recRows = recRes.data ?? [];
-    const payRows = payRes.data ?? [];
-
-    const gs = salesRows.reduce((s,r) => s + Number(r.total_amount||0), 0);
-    const tp = poRows.reduce((s,r) => s + Number(r.total_amount||0), 0);
-    const costOfGoods = tp;
-    const gp = gs - costOfGoods;
-    const rec = recRows.reduce((s,r) => s + Number(r.balance||0), 0);
-    const pay = payRows.reduce((s,r) => s + Number(r.current_balance||0), 0);
-    const ps = (prevSalesRes.data??[]).reduce((s,r) => s + Number(r.total_amount||0), 0);
-
-    // Expenses for net profit
-    let expQ = supabase.from('expenses').select('amount').eq('status','approved').gte('expense_date',dateFrom).lte('expense_date',dateTo);
-    if (branchId !== 'all') expQ = expQ.eq('branch_id', branchId);
-    const expRes = await expQ;
-    const expenses = (expRes.data??[]).reduce((s,r) => s + Number(r.amount||0), 0);
-    const np = gp - expenses;
-
-    setTotalSales(gs);
-    setTotalPurchases(tp);
-    setGrossProfit(gp);
-    setNetProfit(np);
-    setTotalReceivables(rec);
-    setTotalPayables(pay);
-    setPrevSales(ps);
-
-    setPnl([
-      { label: 'Total Sales', amount: gs },
-      { label: 'Less: Cost of Sales', amount: costOfGoods },
-      { label: 'Gross Profit', amount: gp, highlight: true },
-      { label: 'Less: Operating Expenses', amount: expenses },
-      { label: 'Net Profit', amount: np, highlight: true },
-    ]);
-
-    // Monthly trend (last 6 months)
-    const months: MonthlySale[] = [];
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date();
-      d.setMonth(d.getMonth() - i);
-      const label = d.toLocaleString('en-PH',{month:'short',year:'2-digit'});
-      const mFrom = new Date(d.getFullYear(), d.getMonth(), 1).toISOString();
-      const mTo = new Date(d.getFullYear(), d.getMonth()+1, 0, 23,59,59).toISOString();
-      const [mSales, mPO] = await Promise.all([
-        (branchId !== 'all'
-          ? supabase.from('sales').select('total_amount').eq('status','completed').eq('branch_id',branchId).gte('created_at',mFrom).lte('created_at',mTo)
-          : supabase.from('sales').select('total_amount').eq('status','completed').gte('created_at',mFrom).lte('created_at',mTo)),
-        (branchId !== 'all'
-          ? supabase.from('purchase_orders').select('total_amount').not('status','in','(draft,cancelled)').eq('branch_id',branchId).gte('created_at',mFrom).lte('created_at',mTo)
-          : supabase.from('purchase_orders').select('total_amount').not('status','in','(draft,cancelled)').gte('created_at',mFrom).lte('created_at',mTo)),
-      ]);
-      months.push({
-        month: label,
-        sales: (mSales.data??[]).reduce((s,r) => s+Number(r.total_amount||0),0),
-        purchases: (mPO.data??[]).reduce((s,r) => s+Number(r.total_amount||0),0),
+  async function saveCurrentPreset() {
+    if (!activeReport) return;
+    setSaving(true);
+    try {
+      await postReportsAction({
+        action: 'create_preset',
+        preset: {
+          name: presetName.trim() || activeReport.title,
+          description: presetDescription.trim() || null,
+          groupKey: activeGroup,
+          reportId: activeReport.id,
+          branchId: branchId === 'all' ? null : branchId,
+          dateFrom,
+          dateTo,
+          searchTerm: search.trim() || null,
+          filters: {},
+          isShared: false,
+        },
       });
+      setPresetName('');
+      setPresetDescription('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to save preset.');
+    } finally {
+      setSaving(false);
     }
-    setMonthlySales(months);
+  }
 
-    // Sales by category
-    let saleItemsQ = supabase.from('sale_items').select('total_price, product:products(category:categories(name))');
-    const saleIds = salesRows.map(r=>r.id);
-    if (saleIds.length) {
-      const catMap: Record<string,number> = {};
-      const siRes = await (saleIds.length ? supabase.from('sale_items').select('total_price, products(categories(name))').in('sale_id', saleIds.slice(0,100)) : Promise.resolve({data:[]}));
-      (siRes.data??[]).forEach((si: any) => {
-        const cat = si.products?.categories?.name ?? 'Others';
-        catMap[cat] = (catMap[cat]||0) + Number(si.total_price||0);
+  function applyPreset(preset: ReportPreset) {
+    const nextGroup = (preset.group_key as ReportGroup) || 'sales';
+    setActiveGroup(nextGroup);
+    setActiveReportId(preset.report_id);
+    setBranchId(preset.branch_id || 'all');
+    if (preset.date_from) setDateFrom(preset.date_from);
+    if (preset.date_to) setDateTo(preset.date_to);
+    setSearch(preset.search_term || '');
+    setNotice(`Loaded preset: ${preset.name}`);
+  }
+
+  async function createSchedule() {
+    if (!schedulePresetId) {
+      setError('Choose a preset before creating a schedule.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await postReportsAction({
+        action: 'create_schedule',
+        schedule: {
+          presetId: schedulePresetId,
+          name: scheduleName.trim() || 'Scheduled report',
+          branchId: branchId === 'all' ? null : branchId,
+          frequency: scheduleFrequency,
+          dayOfWeek: scheduleFrequency === 'weekly' ? Number(scheduleDayOfWeek) : null,
+          dayOfMonth: scheduleFrequency === 'monthly' ? Number(scheduleDayOfMonth) : null,
+          runTime: scheduleRunTime,
+          exportFormat: scheduleFormat,
+          deliveryChannel: scheduleDelivery,
+          recipients: scheduleRecipients
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean),
+          isActive: true,
+        },
       });
-      const sorted = Object.entries(catMap).sort((a,b)=>b[1]-a[1]).slice(0,6);
-      setCategorySales(sorted.map(([name,value])=>({name,value})));
-    } else {
-      setCategorySales([]);
+      setScheduleName('');
+      setScheduleRecipients('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create schedule.');
+    } finally {
+      setSaving(false);
     }
+  }
 
-    // Top products
-    if (saleIds.length) {
-      const tpRes = await supabase.from('sale_items').select('product_id, quantity, total_price, products(name, sku, categories(name))').in('sale_id', saleIds.slice(0,200));
-      const prodMap: Record<string,{name:string;sku:string;cat:string;qty:number;total:number}> = {};
-      (tpRes.data??[]).forEach((si: any) => {
-        const pid = si.product_id;
-        if (!prodMap[pid]) prodMap[pid] = { name:si.products?.name??'', sku:si.products?.sku??'', cat:si.products?.categories?.name??'', qty:0, total:0 };
-        prodMap[pid].qty += Number(si.quantity||0);
-        prodMap[pid].total += Number(si.total_price||0);
-      });
-      const sorted = Object.values(prodMap).sort((a,b)=>b.qty-a.qty).slice(0,5);
-      setTopProducts(sorted.map(p=>({sku:p.sku,name:p.name,category:p.cat,qty:p.qty,total:p.total})));
-    } else {
-      setTopProducts([]);
+  async function runSchedule(scheduleId: string) {
+    setSaving(true);
+    try {
+      await postReportsAction({ action: 'run_schedule', scheduleId });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to run schedule.');
+    } finally {
+      setSaving(false);
     }
+  }
 
-    // Payment breakdown
-    if (saleIds.length) {
-      const pmRes = await supabase.from('sale_payments').select('payment_method, amount').in('sale_id', saleIds.slice(0,200));
-      const pmMap: Record<string,number> = {};
-      (pmRes.data??[]).forEach((p:any) => {
-        const m = p.payment_method ?? 'cash';
-        pmMap[m] = (pmMap[m]||0) + Number(p.amount||0);
-      });
-      const total = Object.values(pmMap).reduce((s,v)=>s+v,0);
-      const breakdown = Object.entries(pmMap).map(([method,amount])=>({
-        method: method.charAt(0).toUpperCase()+method.slice(1).replace('_',' '),
-        amount,
-        pct: total>0 ? (amount/total)*100 : 0,
-      })).sort((a,b)=>b.amount-a.amount);
-      setPaymentBreakdown(breakdown);
-    } else {
-      setPaymentBreakdown([]);
+  async function runDueSchedules() {
+    setSaving(true);
+    try {
+      await postReportsAction({ action: 'run_due_schedules' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to run due schedules.');
+    } finally {
+      setSaving(false);
     }
+  }
 
-    setLoading(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadAnalytics();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branchId, dateFrom, dateTo]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadMeta();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const salesGrowth = prevSales > 0 ? ((totalSales - prevSales) / prevSales) * 100 : 0;
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const branch = (event as CustomEvent<{ id?: string }>).detail;
+      if (branch?.id) setBranchId(branch.id);
+    };
+    window.addEventListener('branch-changed', handler);
+    return () => window.removeEventListener('branch-changed', handler);
+  }, []);
 
-  const kpis = [
-    { label:'Total Sales (This Month)', value:totalSales, icon:TrendingUp, color:'blue', growth:salesGrowth },
-    { label:'Total Purchases (This Month)', value:totalPurchases, icon:ShoppingCart, color:'orange', growth:null },
-    { label:'Gross Profit (This Month)', value:grossProfit, icon:BarChart2, color:'green', growth:grossProfit>0?((grossProfit/Math.max(totalSales,1))*100):null },
-    { label:'Net Profit (This Month)', value:netProfit, icon:DollarSign, color:'purple', growth:null },
-    { label:'Total Receivables', value:totalReceivables, icon:FileText, color:'teal', growth:null },
-    { label:'Total Payables', value:totalPayables, icon:FileText, color:'red', growth:null },
-  ];
+  const reports = data?.reports ?? [];
+  const groupReports = reports.filter((report) => report.group === activeGroup);
+  const activeReport =
+    groupReports.find((report) => report.id === activeReportId) ??
+    groupReports[0] ??
+    reports[0] ??
+    null;
 
-  const reportCategories = [
-    {
-      title:'Sales Reports', icon:TrendingUp, color:'#1e88e5', bg:'rgba(30,136,229,0.1)',
-      items:['Daily sales','Monthly sales','Sales by cashier','Sales by branch','Sales by category','Sales by brand','Sales by product','Sales by payment method','Discount report','Refund report'],
-    },
-    {
-      title:'Inventory Reports', icon:Package, color:'#f59e0b', bg:'rgba(245,158,11,0.1)',
-      items:['Current stock','Low stock','Out of stock','Inventory valuation','Stock movement','Stock adjustment','Fast-moving items','Slow-moving items','Dead stock'],
-    },
-    {
-      title:'Financial Reports', icon:DollarSign, color:'#22c55e', bg:'rgba(34,197,94,0.1)',
-      items:['Gross sales','Net sales','Gross profit','Expenses','Profit and loss','Supplier payables','Customer receivables','Cash drawer summary'],
-    },
-  ];
+  const filteredRows = activeReport
+    ? activeReport.rows.filter((row) =>
+        !search.trim() ||
+        activeReport.columns.some((column) =>
+          String(row[column.key] ?? '')
+            .toLowerCase()
+            .includes(search.trim().toLowerCase()),
+        ),
+      )
+    : [];
+
+  const meta = GROUP_META[activeGroup];
+  const MetaIcon = meta.icon;
+  const branchName =
+    branchId === 'all'
+      ? 'All Branches'
+      : data?.branches.find((branch) => branch.id === branchId)?.name ?? 'Selected Branch';
+
+  const paymentBreakdown = data?.breakdowns.payment ?? [];
+  const categoryBreakdown = data?.breakdowns.category ?? [];
+  const inventoryHealth = data?.breakdowns.inventoryHealth ?? [];
+  const dailyTrend = data?.trends.daily ?? [];
+  const monthlyTrend = data?.trends.monthly ?? [];
+
+  const tooltipMoney = (value: unknown) => formatCurrency(Number(value ?? 0));
 
   return (
-    <div className="rpt-page">
-      {/* Toolbar */}
-      <div className="rpt-toolbar">
-        <div className="rpt-toolbar__filters">
-          <div className="rpt-filter-group">
+    <div className="ra14-page">
+      <section className="ra14-hero">
+        <div className="ra14-hero__copy">
+          <span className="ra14-hero__eyebrow">{meta.eyebrow}</span>
+          <div className="ra14-hero__headline">
+            <span className="ra14-hero__badge"><MetaIcon size={16} /></span>
+            <div>
+              <h1>{meta.title}</h1>
+              <p>{meta.description}</p>
+            </div>
+          </div>
+        </div>
+        <div className="ra14-hero__summary">
+          <span>{branchName}</span>
+          <span>{dateFrom} to {dateTo}</span>
+          <span>{activeReport?.title ?? 'No report selected'}</span>
+        </div>
+      </section>
+
+      <section className="ra14-toolbar">
+        <div className="ra14-toolbar__filters">
+          <label className="ra14-input ra14-input--date">
             <Calendar size={14} />
-            <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} className="rpt-input" />
-            <span style={{color:'#94a3b8',fontSize:12}}>–</span>
-            <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} className="rpt-input" />
-          </div>
-          <div className="rpt-filter-group">
-            <Filter size={14} />
-            <select value={branchId} onChange={e=>setBranchId(e.target.value)} className="rpt-input">
+            <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
+          </label>
+          <label className="ra14-input ra14-input--date">
+            <Calendar size={14} />
+            <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+          </label>
+          <label className="ra14-input">
+            <Building2 size={14} />
+            <select value={branchId} onChange={(event) => setBranchId(event.target.value)}>
               <option value="all">All Branches</option>
-              {branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+              {(data?.branches ?? []).map((branch) => (
+                <option key={branch.id} value={branch.id}>{branch.name}</option>
+              ))}
             </select>
-          </div>
-          <button onClick={load} className="rpt-btn rpt-btn--primary" disabled={loading}>
-            <RefreshCw size={13} className={loading?'rpt-spin':''} />
-            {loading ? 'Loading…' : 'Refresh'}
+          </label>
+          <label className="ra14-input">
+            <Filter size={14} />
+            <select value={activeGroup} onChange={(event) => setActiveGroup(event.target.value as ReportGroup)}>
+              <option value="sales">Sales Reports</option>
+              <option value="inventory">Inventory Reports</option>
+              <option value="financial">Financial Reports</option>
+            </select>
+          </label>
+        </div>
+        <div className="ra14-toolbar__actions">
+          <button type="button" className="ra14-button ra14-button--ghost" onClick={() => activeReport && exportRowsAsCsv(activeReport, filteredRows)} disabled={!activeReport}>
+            <Download size={14} />
+            CSV
+          </button>
+          <button type="button" className="ra14-button ra14-button--ghost" onClick={() => activeReport && exportRowsAsXlsx(activeReport, filteredRows)} disabled={!activeReport}>
+            <FileSpreadsheet size={14} />
+            Excel
+          </button>
+          <button type="button" className="ra14-button ra14-button--ghost" onClick={() => activeReport && exportRowsAsPdf(activeReport, filteredRows)} disabled={!activeReport}>
+            <Receipt size={14} />
+            PDF
+          </button>
+          <button type="button" className="ra14-button ra14-button--ghost" onClick={() => window.print()}>
+            <Printer size={14} />
+            Print
+          </button>
+          <button type="button" className="ra14-button ra14-button--primary" onClick={() => void loadAnalytics()} disabled={loading}>
+            {loading ? <LoaderCircle size={14} className="ra14-spin" /> : <RefreshCw size={14} />}
+            Refresh
           </button>
         </div>
-        <div className="rpt-toolbar__actions">
-          <button className="rpt-btn rpt-btn--ghost"><Download size={13}/> Export PDF</button>
-          <button className="rpt-btn rpt-btn--ghost"><FileSpreadsheet size={13}/> Excel</button>
-          <button className="rpt-btn rpt-btn--ghost"><Printer size={13}/> Print</button>
-        </div>
-      </div>
+      </section>
 
-      {/* KPI Cards */}
-      <div className="rpt-kpis">
-        {kpis.map(k => (
-          <div key={k.label} className={`rpt-kpi rpt-kpi--${k.color}`}>
-            <div className="rpt-kpi__icon"><k.icon size={18}/></div>
-            <div className="rpt-kpi__body">
-              <div className="rpt-kpi__label">{k.label}</div>
-              <div className="rpt-kpi__value">{loading ? '—' : fmt(k.value)}</div>
-              {k.growth !== null && (
-                <div className={`rpt-kpi__growth ${k.growth>=0?'rpt-kpi__growth--up':'rpt-kpi__growth--down'}`}>
-                  {k.growth>=0 ? <ArrowUpRight size={11}/> : <ArrowDownRight size={11}/>}
-                  {pct(k.growth)} vs prev period
-                </div>
-              )}
+      {error ? (
+        <div className="ra14-alert ra14-alert--error">
+          <CircleAlert size={16} />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      {notice ? (
+        <div className="ra14-alert ra14-alert--success">
+          <Send size={16} />
+          <span>{notice}</span>
+        </div>
+      ) : null}
+
+      <section className="ra14-metrics">
+        {(data?.metrics ?? []).map((metric) => (
+          <article key={metric.id} className={`ra14-metric ra14-metric--${metric.tone}`}>
+            <div className="ra14-metric__icon">
+              {metric.id.includes('inventory') ? <Boxes size={18} /> : null}
+              {metric.id.includes('receivables') ? <BadgeDollarSign size={18} /> : null}
+              {metric.id.includes('payables') ? <Receipt size={18} /> : null}
+              {metric.id.includes('cash') ? <Wallet size={18} /> : null}
+              {metric.id === 'gross-sales' || metric.id === 'net-sales' ? <TrendingUp size={18} /> : null}
+              {metric.id === 'gross-profit' ? <ChartColumn size={18} /> : null}
+              {metric.id === 'expenses' ? <CreditCard size={18} /> : null}
             </div>
-          </div>
+            <div className="ra14-metric__body">
+              <span className="ra14-metric__label">{metric.label}</span>
+              <strong className="ra14-metric__value">{formatCurrency(metric.value)}</strong>
+              <small className="ra14-metric__hint">{metric.hint}</small>
+            </div>
+          </article>
         ))}
-      </div>
+      </section>
 
-      {/* Main grid */}
-      <div className="rpt-main-grid">
-        {/* Sales Overview chart */}
-        <div className="rpt-card rpt-card--chart" style={{gridColumn:'1/3'}}>
-          <div className="rpt-card__header">
-            <span className="rpt-card__title">Sales Overview</span>
-            <span className="rpt-card__sub">Monthly Comparison</span>
+      <section className="ra14-layout">
+        <aside className="ra14-sidebar">
+          <div className="ra14-panel">
+            <div className="ra14-panel__head">
+              <div className="ra14-panel__title-wrap">
+                <span className="ra14-panel__icon"><Download size={15} /></span>
+                <span className="ra14-panel__title">Report Catalog</span>
+              </div>
+            </div>
+            <div className="ra14-catalog-groups">
+              {(['sales', 'inventory', 'financial'] as ReportGroup[]).map((group) => {
+                const groupMeta = GROUP_META[group];
+                const Icon = groupMeta.icon;
+                const count = reports.filter((report) => report.group === group).length;
+                return (
+                  <button
+                    type="button"
+                    key={group}
+                    className={`ra14-catalog-group ${activeGroup === group ? 'ra14-catalog-group--active' : ''}`}
+                    onClick={() => setActiveGroup(group)}
+                  >
+                    <span className="ra14-catalog-group__icon"><Icon size={15} /></span>
+                    <span className="ra14-catalog-group__copy">
+                      <strong>{groupMeta.title}</strong>
+                      <small>{count} reports</small>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="ra14-report-list">
+              {groupReports.map((report) => (
+                <button
+                  type="button"
+                  key={report.id}
+                  className={`ra14-report-link ${activeReportId === report.id ? 'ra14-report-link--active' : ''}`}
+                  onClick={() => setActiveReportId(report.id)}
+                >
+                  <strong>{report.title}</strong>
+                  <small>{report.description}</small>
+                </button>
+              ))}
+            </div>
           </div>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={monthlySales} margin={{top:8,right:16,left:0,bottom:0}}>
-              <defs>
-                <linearGradient id="gSales" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#1e88e5" stopOpacity={0.25}/>
-                  <stop offset="95%" stopColor="#1e88e5" stopOpacity={0}/>
-                </linearGradient>
-                <linearGradient id="gPurch" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#22c55e" stopOpacity={0.2}/>
-                  <stop offset="95%" stopColor="#22c55e" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/>
-              <XAxis dataKey="month" tick={{fontSize:11}} tickLine={false}/>
-              <YAxis tick={{fontSize:11}} tickLine={false} axisLine={false} tickFormatter={v=>'₱'+(v/1000).toFixed(0)+'k'}/>
-              <Tooltip formatter={(v:unknown)=>fmt(Number(v))} contentStyle={{borderRadius:10,border:'1px solid #e2e8f0',fontSize:12}}/>
-              <Legend iconSize={10} wrapperStyle={{fontSize:11}}/>
-              <Area type="monotone" dataKey="sales" name="Sales" stroke="#1e88e5" strokeWidth={2} fill="url(#gSales)"/>
-              <Area type="monotone" dataKey="purchases" name="Purchases" stroke="#22c55e" strokeWidth={2} fill="url(#gPurch)"/>
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
 
-        {/* Sales by Category */}
-        <div className="rpt-card rpt-card--chart">
-          <div className="rpt-card__header">
-            <span className="rpt-card__title">Sales by Category</span>
-            <span className="rpt-card__link">View Full Report</span>
+          <div className="ra14-panel">
+            <div className="ra14-panel__head">
+              <div className="ra14-panel__title-wrap">
+                <span className="ra14-panel__icon"><Save size={15} /></span>
+                <span className="ra14-panel__title">Custom Builder</span>
+              </div>
+            </div>
+            <div className="ra14-form">
+              <label className="ra14-field">
+                <span>Preset name</span>
+                <input value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder="Month-end branch P&L" />
+              </label>
+              <label className="ra14-field">
+                <span>Description</span>
+                <textarea value={presetDescription} onChange={(event) => setPresetDescription(event.target.value)} placeholder="Saved view of the current report filters." />
+              </label>
+              <button type="button" className="ra14-button ra14-button--primary" onClick={() => void saveCurrentPreset()} disabled={!activeReport || saving}>
+                <Save size={14} />
+                Save Current View
+              </button>
+            </div>
+            <div className="ra14-mini-list">
+              {metaLoading ? <EmptyPanel message="Loading presets..." /> : null}
+              {!metaLoading && !presets.length ? <EmptyPanel message="No saved presets yet." /> : null}
+              {!metaLoading && presets.map((preset) => (
+                <div key={preset.id} className="ra14-mini-card">
+                  <div className="ra14-mini-card__copy">
+                    <strong>{preset.name}</strong>
+                    <small>{preset.description || `${preset.group_key} / ${preset.report_id}`}</small>
+                  </div>
+                  <div className="ra14-mini-card__actions">
+                    <button type="button" className="ra14-button ra14-button--ghost ra14-button--sm" onClick={() => applyPreset(preset)}>Load</button>
+                    <button
+                      type="button"
+                      className="ra14-button ra14-button--ghost ra14-button--sm"
+                      onClick={() => void postReportsAction({ action: 'delete_preset', presetId: preset.id }).catch((err: unknown) => setError(err instanceof Error ? err.message : 'Unable to delete preset.'))}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
-          {categorySales.length > 0 ? (
-            <div style={{display:'flex',alignItems:'center',gap:12}}>
-              <PieChart width={150} height={150}>
-                <Pie data={categorySales} cx={70} cy={70} innerRadius={44} outerRadius={68} paddingAngle={2} dataKey="value">
-                  {categorySales.map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
-                </Pie>
-                <Tooltip formatter={(v:unknown)=>fmt(Number(v))} contentStyle={{borderRadius:8,fontSize:11}}/>
-              </PieChart>
-              <div className="rpt-pie-legend">
-                {categorySales.map((c,i)=>(
-                  <div key={c.name} className="rpt-pie-legend__item">
-                    <span className="rpt-pie-legend__dot" style={{background:PIE_COLORS[i%PIE_COLORS.length]}}/>
-                    <span className="rpt-pie-legend__name">{c.name}</span>
-                    <span className="rpt-pie-legend__val">{fmt(c.value)}</span>
+        </aside>
+
+        <div className="ra14-main">
+          <div className="ra14-chart-grid">
+            <BreakdownCard title="Daily Sales Trend" icon={TrendingUp}>
+              {dailyTrend.length ? (
+                <div className="ra14-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={dailyTrend} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="ra14Sales" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#2563eb" stopOpacity={0.24} />
+                          <stop offset="95%" stopColor="#2563eb" stopOpacity={0} />
+                        </linearGradient>
+                        <linearGradient id="ra14Profit" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#0f766e" stopOpacity={0.18} />
+                          <stop offset="95%" stopColor="#0f766e" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid stroke="#e5edf7" strokeDasharray="3 3" />
+                      <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} />
+                      <YAxis tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} tickFormatter={(value) => `P${Math.round(Number(value) / 1000)}k`} />
+                      <Tooltip formatter={(value: unknown) => tooltipMoney(value)} />
+                      <Area type="monotone" dataKey="netSales" stroke="#2563eb" fill="url(#ra14Sales)" strokeWidth={2} />
+                      <Area type="monotone" dataKey="grossProfit" stroke="#0f766e" fill="url(#ra14Profit)" strokeWidth={2} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <EmptyPanel message="No trend data available for this range." />
+              )}
+            </BreakdownCard>
+
+            <BreakdownCard title="Monthly Performance" icon={ChartColumn}>
+              {monthlyTrend.length ? (
+                <div className="ra14-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={monthlyTrend} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
+                      <CartesianGrid stroke="#e5edf7" strokeDasharray="3 3" vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} />
+                      <YAxis tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} tickFormatter={(value) => `P${Math.round(Number(value) / 1000)}k`} />
+                      <Tooltip formatter={(value: unknown) => tooltipMoney(value)} />
+                      <Bar dataKey="grossSales" fill="#bfdbfe" radius={[8, 8, 0, 0]} />
+                      <Bar dataKey="netSales" fill="#2563eb" radius={[8, 8, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <EmptyPanel message="No monthly data available for this range." />
+              )}
+            </BreakdownCard>
+          </div>
+
+          <div className="ra14-chart-grid ra14-chart-grid--secondary">
+            <BreakdownCard title="Payment Mix" icon={CreditCard}>
+              {paymentBreakdown.length ? (
+                <div className="ra14-breakdown">
+                  <PieChart width={170} height={170}>
+                    <Pie data={paymentBreakdown} dataKey="value" cx={80} cy={80} innerRadius={42} outerRadius={70} paddingAngle={2}>
+                      {paymentBreakdown.map((item, index) => (
+                        <Cell key={item.name} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip formatter={(value: unknown) => tooltipMoney(value)} />
+                  </PieChart>
+                  <div className="ra14-breakdown__legend">
+                    {paymentBreakdown.map((item, index) => (
+                      <div key={item.name} className="ra14-legend-row">
+                        <span className="ra14-legend-row__dot" style={{ background: PIE_COLORS[index % PIE_COLORS.length] }} />
+                        <span className="ra14-legend-row__name">{item.name}</span>
+                        <strong>{formatCurrency(item.value)}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <EmptyPanel message="No payment breakdown available." />
+              )}
+            </BreakdownCard>
+
+            <BreakdownCard title={activeGroup === 'inventory' ? 'Inventory Health' : 'Top Categories'} icon={activeGroup === 'inventory' ? Boxes : Package}>
+              {activeGroup === 'inventory' ? (
+                inventoryHealth.length ? (
+                  <div className="ra14-bars">
+                    {inventoryHealth.map((item, index) => {
+                      const maxValue = Math.max(...inventoryHealth.map((entry) => entry.value), 1);
+                      return (
+                        <div key={item.name} className="ra14-bar-row">
+                          <div className="ra14-bar-row__top">
+                            <span>{item.name}</span>
+                            <strong>{NUMBER.format(item.value)}</strong>
+                          </div>
+                          <div className="ra14-bar-row__track">
+                            <div className="ra14-bar-row__fill" style={{ width: `${(item.value / maxValue) * 100}%`, background: PIE_COLORS[index % PIE_COLORS.length] }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <EmptyPanel message="No stock data available." />
+                )
+              ) : categoryBreakdown.length ? (
+                <div className="ra14-bars">
+                  {categoryBreakdown.map((item, index) => {
+                    const maxValue = Math.max(...categoryBreakdown.map((entry) => entry.value), 1);
+                    return (
+                      <div key={item.name} className="ra14-bar-row">
+                        <div className="ra14-bar-row__top">
+                          <span>{item.name}</span>
+                          <strong>{formatCurrency(item.value)}</strong>
+                        </div>
+                        <div className="ra14-bar-row__track">
+                          <div className="ra14-bar-row__fill" style={{ width: `${(item.value / maxValue) * 100}%`, background: PIE_COLORS[index % PIE_COLORS.length] }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <EmptyPanel message="No category data available." />
+              )}
+            </BreakdownCard>
+          </div>
+
+          <section className="ra14-panel ra14-panel--table">
+            <div className="ra14-panel__head ra14-panel__head--table">
+              <div>
+                <div className="ra14-panel__title-wrap">
+                  <span className="ra14-panel__icon"><FileSpreadsheet size={15} /></span>
+                  <span className="ra14-panel__title">{activeReport?.title ?? 'Report'}</span>
+                </div>
+                <p className="ra14-panel__description">{activeReport?.description ?? 'Select a report to view details.'}</p>
+              </div>
+              <div className="ra14-panel__meta">
+                <span>{activeReport?.scopeLabel}</span>
+                <span>{NUMBER.format(filteredRows.length)} rows</span>
+              </div>
+            </div>
+
+            <div className="ra14-table-toolbar">
+              <label className="ra14-input ra14-input--search">
+                <Search size={14} />
+                <input type="search" placeholder="Search this report" value={search} onChange={(event) => setSearch(event.target.value)} />
+              </label>
+            </div>
+
+            {!activeReport ? (
+              <EmptyPanel message="No report is available for the selected group." />
+            ) : loading ? (
+              <div className="ra14-loading">
+                <LoaderCircle size={18} className="ra14-spin" />
+                <span>Loading analytics workspace...</span>
+              </div>
+            ) : !filteredRows.length ? (
+              <EmptyPanel message="No rows match the current report filters." />
+            ) : (
+              <div className="ra14-table-wrap">
+                <table className="ra14-table">
+                  <thead>
+                    <tr>
+                      {activeReport.columns.map((column) => (
+                        <th key={column.key} className={column.align === 'right' ? 'ra14-ta-right' : ''}>{column.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredRows.map((row, index) => (
+                      <tr key={`${activeReport.id}-${index}`}>
+                        {activeReport.columns.map((column) => (
+                          <td key={column.key} className={column.align === 'right' ? 'ra14-ta-right' : ''}>
+                            {formatCell(column, row[column.key])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section className="ra14-bottom-grid">
+            <div className="ra14-panel">
+              <div className="ra14-panel__head">
+                <div className="ra14-panel__title-wrap">
+                  <span className="ra14-panel__icon"><Clock3 size={15} /></span>
+                  <span className="ra14-panel__title">Scheduled Reports</span>
+                </div>
+                <button type="button" className="ra14-button ra14-button--ghost ra14-button--sm" onClick={() => void runDueSchedules()} disabled={saving}>
+                  <RefreshCw size={13} />
+                  Run Due
+                </button>
+              </div>
+              <div className="ra14-form">
+                <label className="ra14-field">
+                  <span>Preset</span>
+                  <select value={schedulePresetId} onChange={(event) => setSchedulePresetId(event.target.value)}>
+                    <option value="">Choose preset</option>
+                    {presets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="ra14-field">
+                  <span>Schedule name</span>
+                  <input value={scheduleName} onChange={(event) => setScheduleName(event.target.value)} placeholder="Weekly cashier sales" />
+                </label>
+                <div className="ra14-form__row">
+                  <label className="ra14-field">
+                    <span>Frequency</span>
+                    <select value={scheduleFrequency} onChange={(event) => setScheduleFrequency(event.target.value as 'daily' | 'weekly' | 'monthly')}>
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                    </select>
+                  </label>
+                  <label className="ra14-field">
+                    <span>Run time</span>
+                    <input type="time" value={scheduleRunTime} onChange={(event) => setScheduleRunTime(event.target.value)} />
+                  </label>
+                </div>
+                {scheduleFrequency === 'weekly' ? (
+                  <label className="ra14-field">
+                    <span>Day of week</span>
+                    <select value={scheduleDayOfWeek} onChange={(event) => setScheduleDayOfWeek(event.target.value)}>
+                      <option value="0">Sunday</option>
+                      <option value="1">Monday</option>
+                      <option value="2">Tuesday</option>
+                      <option value="3">Wednesday</option>
+                      <option value="4">Thursday</option>
+                      <option value="5">Friday</option>
+                      <option value="6">Saturday</option>
+                    </select>
+                  </label>
+                ) : null}
+                {scheduleFrequency === 'monthly' ? (
+                  <label className="ra14-field">
+                    <span>Day of month</span>
+                    <input type="number" min="1" max="31" value={scheduleDayOfMonth} onChange={(event) => setScheduleDayOfMonth(event.target.value)} />
+                  </label>
+                ) : null}
+                <div className="ra14-form__row">
+                  <label className="ra14-field">
+                    <span>Format</span>
+                    <select value={scheduleFormat} onChange={(event) => setScheduleFormat(event.target.value as 'pdf' | 'xlsx' | 'csv')}>
+                      <option value="pdf">PDF</option>
+                      <option value="xlsx">Excel</option>
+                      <option value="csv">CSV</option>
+                    </select>
+                  </label>
+                  <label className="ra14-field">
+                    <span>Delivery</span>
+                    <select value={scheduleDelivery} onChange={(event) => setScheduleDelivery(event.target.value as 'download_center' | 'email')}>
+                      <option value="download_center">Download center</option>
+                      <option value="email">Email queue</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="ra14-field">
+                  <span>Recipients</span>
+                  <input value={scheduleRecipients} onChange={(event) => setScheduleRecipients(event.target.value)} placeholder="owner@example.com, branch@example.com" />
+                </label>
+                <button type="button" className="ra14-button ra14-button--primary" onClick={() => void createSchedule()} disabled={saving || !presets.length}>
+                  <Clock3 size={14} />
+                  Save Schedule
+                </button>
+              </div>
+              <div className="ra14-mini-list">
+                {metaLoading ? <EmptyPanel message="Loading schedules..." /> : null}
+                {!metaLoading && !schedules.length ? <EmptyPanel message="No schedules created yet." /> : null}
+                {!metaLoading && schedules.map((schedule) => (
+                  <div key={schedule.id} className="ra14-mini-card">
+                    <div className="ra14-mini-card__copy">
+                      <strong>{schedule.name}</strong>
+                      <small>{schedule.frequency} • {schedule.export_format.toUpperCase()} • next {schedule.next_run_at ? formatCell({ key: 'next', label: 'Next', type: 'datetime' }, schedule.next_run_at) : 'inactive'}</small>
+                    </div>
+                    <div className="ra14-mini-card__actions">
+                      <button type="button" className="ra14-button ra14-button--ghost ra14-button--sm" onClick={() => void runSchedule(schedule.id)} disabled={saving}>Run</button>
+                      <button
+                        type="button"
+                        className="ra14-button ra14-button--ghost ra14-button--sm"
+                        onClick={() => void postReportsAction({ action: 'delete_schedule', scheduleId: schedule.id }).catch((err: unknown) => setError(err instanceof Error ? err.message : 'Unable to delete schedule.'))}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
-          ) : (
-            <div className="rpt-empty">No data for selected period</div>
-          )}
-        </div>
 
-        {/* Top Selling Items */}
-        <div className="rpt-card">
-          <div className="rpt-card__header">
-            <span className="rpt-card__title">Top Selling Items</span>
-            <span className="rpt-card__link">View Full Report</span>
-          </div>
-          <table className="rpt-table">
-            <thead><tr><th>#</th><th>SKU</th><th>Item Name</th><th>Category</th><th>Qty</th><th>Total Sales</th></tr></thead>
-            <tbody>
-              {topProducts.length === 0 && <tr><td colSpan={6} style={{textAlign:'center',color:'#94a3b8',padding:16}}>No data</td></tr>}
-              {topProducts.map((p,i)=>(
-                <tr key={p.sku}>
-                  <td>{i+1}</td>
-                  <td><a className="rpt-link">{p.sku}</a></td>
-                  <td>{p.name}</td>
-                  <td>{p.category}</td>
-                  <td>{p.qty}</td>
-                  <td>{fmt(p.total)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* P&L Summary */}
-        <div className="rpt-card">
-          <div className="rpt-card__header">
-            <span className="rpt-card__title">Profit &amp; Loss Summary</span>
-            <span className="rpt-card__link">View Full Report</span>
-          </div>
-          <table className="rpt-table">
-            <thead><tr><th>Description</th><th>Amount</th></tr></thead>
-            <tbody>
-              {pnl.map(row=>(
-                <tr key={row.label} className={row.highlight?'rpt-table__highlight':''}>
-                  <td>{row.label}</td>
-                  <td className={row.amount<0?'rpt-red':row.highlight?'rpt-blue':''}>{fmt(row.amount)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Sales by Payment Method */}
-        <div className="rpt-card rpt-card--chart">
-          <div className="rpt-card__header">
-            <span className="rpt-card__title">Sales by Payment Method</span>
-          </div>
-          {paymentBreakdown.length > 0 ? (
-            <div style={{display:'flex',alignItems:'center',gap:12}}>
-              <PieChart width={150} height={150}>
-                <Pie data={paymentBreakdown} cx={70} cy={70} innerRadius={44} outerRadius={68} paddingAngle={2} dataKey="amount">
-                  {paymentBreakdown.map((_,i)=><Cell key={i} fill={PIE_COLORS[i%PIE_COLORS.length]}/>)}
-                </Pie>
-                <Tooltip formatter={(v:unknown)=>fmt(Number(v))} contentStyle={{borderRadius:8,fontSize:11}}/>
-              </PieChart>
-              <div className="rpt-pie-legend">
-                {paymentBreakdown.map((p,i)=>(
-                  <div key={p.method} className="rpt-pie-legend__item">
-                    <span className="rpt-pie-legend__dot" style={{background:PIE_COLORS[i%PIE_COLORS.length]}}/>
-                    <span className="rpt-pie-legend__name">{p.method}</span>
-                    <span className="rpt-pie-legend__val">{fmt(p.amount)} <span style={{color:'#94a3b8'}}>({p.pct.toFixed(1)}%)</span></span>
+            <div className="ra14-panel">
+              <div className="ra14-panel__head">
+                <div className="ra14-panel__title-wrap">
+                  <span className="ra14-panel__icon"><Send size={15} /></span>
+                  <span className="ra14-panel__title">Schedule Run History</span>
+                </div>
+              </div>
+              <div className="ra14-mini-list">
+                {metaLoading ? <EmptyPanel message="Loading run history..." /> : null}
+                {!metaLoading && !runs.length ? <EmptyPanel message="No schedule runs recorded yet." /> : null}
+                {!metaLoading && runs.map((run) => (
+                  <div key={run.id} className="ra14-mini-card">
+                    <div className="ra14-mini-card__copy">
+                      <strong>{run.output_file_name || run.export_format.toUpperCase()}</strong>
+                      <small>{run.status} • {formatCell({ key: 'started_at', label: 'Started', type: 'datetime' }, run.started_at)}</small>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
-          ) : (
-            <div className="rpt-empty">No data for selected period</div>
-          )}
+          </section>
         </div>
-
-        {/* Monthly Comparison Bar */}
-        <div className="rpt-card rpt-card--chart">
-          <div className="rpt-card__header">
-            <span className="rpt-card__title">Monthly Comparison</span>
-          </div>
-          <ResponsiveContainer width="100%" height={170}>
-            <BarChart data={monthlySales} margin={{top:4,right:8,left:0,bottom:0}}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0"/>
-              <XAxis dataKey="month" tick={{fontSize:10}} tickLine={false}/>
-              <YAxis tick={{fontSize:10}} tickLine={false} axisLine={false} tickFormatter={v=>'₱'+(v/1000).toFixed(0)+'k'}/>
-              <Tooltip formatter={(v:unknown)=>fmt(Number(v))} contentStyle={{borderRadius:8,fontSize:11}}/>
-              <Bar dataKey="sales" name="Sales" fill="#1e88e5" radius={[4,4,0,0]}/>
-              <Bar dataKey="purchases" name="Purchases" fill="#22c55e" radius={[4,4,0,0]}/>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Reports Center */}
-        <div className="rpt-card rpt-center-col">
-          <div className="rpt-card__header">
-            <span className="rpt-card__title">Reports Center</span>
-          </div>
-          <div className="rpt-center-list">
-            {reportCategories.map(rc=>(
-              <div key={rc.title} className="rpt-center-item">
-                <div className="rpt-center-item__icon" style={{background:rc.bg}}>
-                  <rc.icon size={15} color={rc.color}/>
-                </div>
-                <div className="rpt-center-item__body">
-                  <div className="rpt-center-item__title">{rc.title}</div>
-                  <div className="rpt-center-item__sub">View, filter and export reports</div>
-                </div>
-                <ChevronRight size={14} color="#94a3b8"/>
-              </div>
-            ))}
-            <div className="rpt-center-item">
-              <div className="rpt-center-item__icon" style={{background:'rgba(168,85,247,0.1)'}}>
-                <FileText size={15} color="#a855f7"/>
-              </div>
-              <div className="rpt-center-item__body">
-                <div className="rpt-center-item__title">Purchasing Reports</div>
-                <div className="rpt-center-item__sub">Track purchases and supplier performance</div>
-              </div>
-              <ChevronRight size={14} color="#94a3b8"/>
-            </div>
-            <div className="rpt-center-item">
-              <div className="rpt-center-item__icon" style={{background:'rgba(239,68,68,0.1)'}}>
-                <FileText size={15} color="#ef4444"/>
-              </div>
-              <div className="rpt-center-item__body">
-                <div className="rpt-center-item__title">Receivables Reports</div>
-                <div className="rpt-center-item__sub">Analyze collections and customer balances</div>
-              </div>
-              <ChevronRight size={14} color="#94a3b8"/>
-            </div>
-          </div>
-          <div className="rpt-actions">
-            <button className="rpt-btn rpt-btn--primary"><Download size={12}/> Export Report</button>
-            <button className="rpt-btn rpt-btn--ghost"><Printer size={12}/> Print Report</button>
-            <button className="rpt-btn rpt-btn--ghost"><Calendar size={12}/> Schedule</button>
-          </div>
-        </div>
-      </div>
-
-      {/* Info bar */}
-      <div className="rpt-info-bar">
-        <span className="rpt-info-dot"/>
-        Reports are based on the selected date range. Use filters to customize your results.
-      </div>
+      </section>
     </div>
   );
 }

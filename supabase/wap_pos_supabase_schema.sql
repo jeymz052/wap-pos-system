@@ -892,6 +892,8 @@ CREATE INDEX idx_po_supplier_id ON purchase_orders(supplier_id);
 CREATE INDEX idx_po_branch_id ON purchase_orders(branch_id);
 CREATE INDEX idx_po_status ON purchase_orders(status);
 CREATE INDEX idx_po_created_at ON purchase_orders(created_at);
+CREATE INDEX idx_po_items_po_id ON purchase_order_items(po_id);
+CREATE INDEX idx_po_items_product_id ON purchase_order_items(product_id);
 
 -- Customers & Suppliers
 CREATE INDEX idx_customers_type ON customers(customer_type);
@@ -941,6 +943,7 @@ ALTER TABLE sales ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sale_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sale_payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE purchase_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE purchase_order_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE suppliers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE expenses ENABLE ROW LEVEL SECURITY;

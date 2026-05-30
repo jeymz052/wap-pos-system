@@ -26,6 +26,9 @@ import {
 import { Cell, Pie, PieChart, ResponsiveContainer } from "recharts";
 import BarcodeStudioModal from "@/components/barcodes/BarcodeStudioModal";
 import { supabase } from "@/lib/supabase";
+import { useRbac } from "@/components/RbacProvider";
+import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
+import { formatPlanName } from "@/lib/subscription-config";
 
 type BranchOption = {
   id: string;
@@ -607,6 +610,8 @@ async function fetchInventorySnapshot(selectedBranchId: string): Promise<Invento
 }
 
 export default function InventoryPage() {
+  const { canAny } = useRbac();
+  const { hasFeature, requiredPlanFor } = useSubscriptionAccess();
   const hasMounted = useSyncExternalStore(
     () => () => {},
     () => true,
@@ -622,6 +627,10 @@ export default function InventoryPage() {
   const [brands, setBrands] = useState<FilterOption[]>([]);
   const [suppliers, setSuppliers] = useState<FilterOption[]>([]);
   const [motorcycleModels, setMotorcycleModels] = useState<MotorcycleModelOption[]>([]);
+  const canViewCostPrice = canAny("inventory:view_cost_price", "inventory:manage");
+  const canEditInventory = canAny("inventory:edit", "inventory:manage");
+  const canDeleteProduct = canAny("inventory:delete", "inventory:manage");
+  const canUseBarcodePrinting = hasFeature("barcode_printing");
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [topMovingItems, setTopMovingItems] = useState<Array<{ productId: string; quantity: number }>>([]);
   const [selectedBranchId, setSelectedBranchId] = useState("");
@@ -1024,6 +1033,14 @@ export default function InventoryPage() {
   };
 
   const openBarcodeStudio = (item?: InventoryItem) => {
+    if (!canUseBarcodePrinting) {
+      setNotice({
+        tone: "error",
+        message: `Barcode printing requires ${formatPlanName(requiredPlanFor("barcode_printing"))}.`,
+      });
+      return;
+    }
+
     const targetItem = item ?? selectedItem ?? filteredItems[0] ?? null;
     if (!targetItem) {
       setNotice({ tone: "error", message: "Select a product first to manage or print barcodes." });
@@ -1594,7 +1611,7 @@ export default function InventoryPage() {
                 <PackagePlus size={14} />
                 <span>Import</span>
               </button>
-              <button type="button" className="inventory-action inventory-action--light" onClick={() => openBarcodeStudio()}>
+              <button type="button" className="inventory-action inventory-action--light" onClick={() => openBarcodeStudio()} disabled={!canUseBarcodePrinting}>
                 <Barcode size={14} />
                 <span>{selectedBarcodeIds.length ? `Barcode Printing (${selectedBarcodeIds.length})` : "Barcode Printing"}</span>
               </button>
@@ -1693,7 +1710,7 @@ export default function InventoryPage() {
                             </td>
                             <td>{item.categoryName}</td>
                             <td>{item.brandName}</td>
-                            <td>{formatCurrency(item.costPrice)}</td>
+                            <td>{canViewCostPrice ? formatCurrency(item.costPrice) : "Restricted"}</td>
                             <td>{formatCurrency(item.sellingPrice)}</td>
                             <td>{formatQuantity(item.quantity, item.unitType)}</td>
                             <td>
@@ -1725,28 +1742,32 @@ export default function InventoryPage() {
                                 >
                                   <Barcode size={13} />
                                 </button>
-                                <button
-                                  type="button"
-                                  className="inventory-icon-button"
-                                  aria-label={`Edit ${item.name}`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    openEditDialog(item);
-                                  }}
-                                >
-                                  <Pencil size={13} />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="inventory-icon-button inventory-icon-button--danger"
-                                  aria-label={`Delete ${item.name}`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void handleDeleteProduct(item);
-                                  }}
-                                >
-                                  <Trash2 size={13} />
-                                </button>
+                                {canEditInventory ? (
+                                  <button
+                                    type="button"
+                                    className="inventory-icon-button"
+                                    aria-label={`Edit ${item.name}`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openEditDialog(item);
+                                    }}
+                                  >
+                                    <Pencil size={13} />
+                                  </button>
+                                ) : null}
+                                {canDeleteProduct ? (
+                                  <button
+                                    type="button"
+                                    className="inventory-icon-button inventory-icon-button--danger"
+                                    aria-label={`Delete ${item.name}`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void handleDeleteProduct(item);
+                                    }}
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                ) : null}
                               </div>
                             </td>
                           </tr>
@@ -1905,7 +1926,7 @@ export default function InventoryPage() {
                     </div>
 
                     <div className="inventory-detail-card__actions">
-                      <button type="button" className="inventory-action inventory-action--light" onClick={() => openBarcodeStudio(selectedItem)}>
+                      <button type="button" className="inventory-action inventory-action--light" onClick={() => openBarcodeStudio(selectedItem)} disabled={!canUseBarcodePrinting}>
                         <Barcode size={14} />
                         <span>Barcode Studio</span>
                       </button>
@@ -2527,7 +2548,7 @@ export default function InventoryPage() {
               </div>
 
               <div className="inventory-form__footer">
-                {dialogMode === "edit" && editingItemId ? (
+                {dialogMode === "edit" && editingItemId && canDeleteProduct ? (
                   <button
                     type="button"
                     className="inventory-action inventory-action--danger-light"

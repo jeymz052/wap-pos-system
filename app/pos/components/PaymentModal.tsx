@@ -13,6 +13,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
+import { supabase } from "@/lib/supabase";
 
 export type CartItemPayload = {
   productId: string;
@@ -35,6 +36,23 @@ export type PaymentSuccessPayload = {
   changeAmount: number;
 };
 
+type CustomerCreditInfo = {
+  creditLimit: number;
+  currentBalance: number;
+  availableCredit: number;
+  allowCredit: boolean;
+  defaultCreditTermsDays: number;
+};
+
+type PayMongoLinkState = {
+  linkId: string;
+  checkoutUrl: string;
+  referenceNumber: string;
+  status: string;
+  paid: boolean;
+  method: string;
+};
+
 type Props = {
   cartItems: CartItemPayload[];
   subtotal: number;
@@ -43,6 +61,7 @@ type Props = {
   total: number;
   customerId: string | null;
   customerName: string;
+  customerCredit?: CustomerCreditInfo | null;
   branchId: string;
   cashierId: string;
   shiftId: string | null;
@@ -60,11 +79,17 @@ const METHODS = [
   { key: "split", label: "Split Payment", icon: SplitSquareVertical },
 ];
 
-const LIVE_METHODS = new Set(["cash", "gcash", "split"]);
-const COMING_SOON_METHODS = new Set(["card", "bank_transfer", "customer_credit"]);
+const LIVE_METHODS = new Set(["cash", "gcash", "card", "bank_transfer", "customer_credit", "split"]);
+const PAYMONGO_METHODS = new Set(["gcash", "card", "bank_transfer"]);
 
 function fmt(v: number) {
   return `P${v.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession();
+  const accessToken = data.session?.access_token;
+  return accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
 }
 
 export default function PaymentModal(props: Props) {
@@ -76,6 +101,7 @@ export default function PaymentModal(props: Props) {
     total,
     customerId,
     customerName,
+    customerCredit,
     branchId,
     cashierId,
     shiftId,
@@ -91,10 +117,13 @@ export default function PaymentModal(props: Props) {
     { method: "cash", amount: total, referenceNo: "" },
   ]);
   const [processing, setProcessing] = useState(false);
+  const [paymongoLoading, setPaymongoLoading] = useState(false);
   const [error, setError] = useState("");
+  const [gcashMode, setGcashMode] = useState<"manual" | "paymongo">("manual");
+  const [paymongoLink, setPaymongoLink] = useState<PayMongoLinkState | null>(null);
 
   const isSplit = selectedMethod === "split";
-  const isComingSoonMethod = COMING_SOON_METHODS.has(selectedMethod);
+  const usesPayMongo = PAYMONGO_METHODS.has(selectedMethod);
   const cashChange = Math.max(0, parseFloat(cashReceived || "0") - total);
   const splitTotal = splitLines.reduce((s, l) => s + l.amount, 0);
   const splitRemaining = total - splitTotal;
@@ -111,17 +140,71 @@ export default function PaymentModal(props: Props) {
     setSplitLines((prev) => prev.map((l, idx) => (idx === i ? { ...l, [field]: value } : l)));
   }
 
+  async function createPayMongoLink() {
+    setError("");
+    setPaymongoLoading(true);
+
+    try {
+      const response = await fetch("/api/pos/paymongo/create-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(await getAuthHeaders()) },
+        body: JSON.stringify({
+          amount: total,
+          currency: "PHP",
+          description: `POS sale for ${customerName}`,
+          method: selectedMethod,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to create PayMongo payment link.");
+
+      setPaymongoLink({
+        linkId: data.linkId,
+        checkoutUrl: data.checkoutUrl,
+        referenceNumber: data.referenceNumber,
+        status: data.status ?? "unpaid",
+        paid: false,
+        method: selectedMethod,
+      });
+      setReferenceNo(data.referenceNumber ?? "");
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "Unable to create PayMongo payment link.");
+    } finally {
+      setPaymongoLoading(false);
+    }
+  }
+
+  async function refreshPayMongoStatus() {
+    if (!paymongoLink?.linkId) return;
+
+    setError("");
+    setPaymongoLoading(true);
+
+    try {
+      const response = await fetch(`/api/pos/paymongo/check-status?linkId=${encodeURIComponent(paymongoLink.linkId)}`, {
+        headers: await getAuthHeaders(),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to check PayMongo status.");
+
+      setPaymongoLink((current) => current ? {
+        ...current,
+        status: data.status ?? current.status,
+        paid: Boolean(data.paid),
+      } : current);
+    } catch (statusError) {
+      setError(statusError instanceof Error ? statusError.message : "Unable to check PayMongo status.");
+    } finally {
+      setPaymongoLoading(false);
+    }
+  }
+
   async function handlePay() {
     setError("");
     setProcessing(true);
 
     try {
-      if (isComingSoonMethod) {
-        setError("This payment method is prepared in the POS but is still marked Coming Soon until the client activates it in PayMongo.");
-        setProcessing(false);
-        return;
-      }
-
       let payments: PaymentLine[];
       if (isSplit) {
         if (Math.abs(splitRemaining) > 0.01) {
@@ -130,7 +213,7 @@ export default function PaymentModal(props: Props) {
           return;
         }
         if (splitLines.some((line) => !LIVE_METHODS.has(line.method))) {
-          setError("Split payment currently supports Cash and QR Ph / GCash only.");
+          setError("Split payment includes a method that is not active yet.");
           setProcessing(false);
           return;
         }
@@ -142,7 +225,58 @@ export default function PaymentModal(props: Props) {
           setProcessing(false);
           return;
         }
+        if (usesPayMongo && selectedMethod !== "gcash") {
+          if (!paymongoLink?.linkId || paymongoLink.method !== selectedMethod) {
+            setError("Generate a PayMongo checkout link first for this payment method.");
+            setProcessing(false);
+            return;
+          }
+
+          if (!paymongoLink.paid) {
+            setError("PayMongo payment is not marked paid yet. Refresh the link status after the customer completes checkout.");
+            setProcessing(false);
+            return;
+          }
+        }
+
+        if (selectedMethod === "gcash" && gcashMode === "paymongo") {
+          if (!paymongoLink?.linkId) {
+            setError("Generate a PayMongo QR checkout link first, or switch back to manual QR reference.");
+            setProcessing(false);
+            return;
+          }
+
+          if (!paymongoLink.paid) {
+            setError("PayMongo payment is not marked paid yet. Refresh the link status after the customer completes checkout.");
+            setProcessing(false);
+            return;
+          }
+        }
         payments = [{ method: selectedMethod, amount: total, referenceNo }];
+      }
+
+      const creditTotal = payments
+        .filter((payment) => payment.method === "customer_credit")
+        .reduce((sum, payment) => sum + payment.amount, 0);
+
+      if (creditTotal > 0) {
+        if (!customerId) {
+          setError("Select a registered customer to use customer credit.");
+          setProcessing(false);
+          return;
+        }
+
+        if (!customerCredit?.allowCredit) {
+          setError("This customer is not allowed to purchase on credit.");
+          setProcessing(false);
+          return;
+        }
+
+        if (creditTotal > (customerCredit?.availableCredit ?? 0)) {
+          setError(`Customer credit exceeds available limit of ${fmt(customerCredit?.availableCredit ?? 0)}.`);
+          setProcessing(false);
+          return;
+        }
       }
 
       const amountPaid = isSplit ? splitTotal : parseFloat(cashReceived || String(total));
@@ -150,7 +284,7 @@ export default function PaymentModal(props: Props) {
 
       const resp = await fetch("/api/pos/complete-sale", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(await getAuthHeaders()) },
         body: JSON.stringify({
           branchId,
           cashierId,
@@ -223,7 +357,6 @@ export default function PaymentModal(props: Props) {
                 >
                   <Icon size={18} />
                   <span>{m.label}</span>
-                  {COMING_SOON_METHODS.has(m.key) ? <small>Coming Soon</small> : null}
                 </button>
               );
             })}
@@ -260,23 +393,98 @@ export default function PaymentModal(props: Props) {
 
               {selectedMethod === "gcash" && (
                 <>
-                  <label className="pos-pay-label">
-                    QR Ph Reference Number
-                    <input
-                      type="text"
-                      placeholder="Enter the reference from GCash or online banking"
-                      value={referenceNo}
-                      onChange={(e) => setReferenceNo(e.target.value)}
-                      className="pos-pay-input"
-                      autoFocus
-                    />
-                  </label>
-                  <p className="pos-pay-warning">Use the client&apos;s active QR Ph code for GCash and supported online banking apps, then record the payment reference here.</p>
+                  <div className="pos-quick-cash">
+                    <button type="button" onClick={() => setGcashMode("manual")} disabled={gcashMode === "manual"}>Manual QR Ref</button>
+                    <button type="button" onClick={() => setGcashMode("paymongo")} disabled={gcashMode === "paymongo"}>PayMongo Link</button>
+                  </div>
+
+                  {gcashMode === "manual" ? (
+                    <>
+                      <label className="pos-pay-label">
+                        QR Ph Reference Number
+                        <input
+                          type="text"
+                          placeholder="Enter the reference from GCash or online banking"
+                          value={referenceNo}
+                          onChange={(e) => setReferenceNo(e.target.value)}
+                          className="pos-pay-input"
+                          autoFocus
+                        />
+                      </label>
+                      <p className="pos-pay-warning">Use the client&apos;s active QR Ph code for GCash and supported online banking apps, then record the payment reference here.</p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="pos-split-footer" style={{ justifyContent: "flex-start", gap: 10 }}>
+                        <button type="button" onClick={() => void createPayMongoLink()} className="pos-split-add" disabled={paymongoLoading}>
+                          {paymongoLoading ? "Generating..." : "Generate PayMongo QR Link"}
+                        </button>
+                        {paymongoLink ? (
+                          <button type="button" onClick={() => void refreshPayMongoStatus()} className="pos-split-add" disabled={paymongoLoading}>
+                            {paymongoLoading ? "Checking..." : "Refresh Status"}
+                          </button>
+                        ) : null}
+                      </div>
+                      {paymongoLink ? (
+                        <div className="pos-pay-warning" style={{ display: "grid", gap: 8 }}>
+                          <span>Reference: <strong>{paymongoLink.referenceNumber}</strong></span>
+                          <span>Status: <strong>{paymongoLink.paid ? "Paid" : paymongoLink.status}</strong></span>
+                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              className="pos-split-add"
+                              onClick={() => window.open(paymongoLink.checkoutUrl, "_blank", "noopener,noreferrer")}
+                            >
+                              Open Checkout
+                            </button>
+                          </div>
+                          <span>Use this when the client wants the POS to launch a PayMongo checkout page instead of collecting the QR Ph reference manually.</span>
+                        </div>
+                      ) : (
+                        <p className="pos-pay-warning">Generate a PayMongo link to open the hosted QR Ph / GCash checkout and confirm payment after it is marked paid.</p>
+                      )}
+                    </>
+                  )}
                 </>
               )}
 
               {(selectedMethod === "card" || selectedMethod === "bank_transfer") && (
-                <p className="pos-pay-warning">This method is prepared for PayMongo activation but is currently Coming Soon.</p>
+                <>
+                  <div className="pos-split-footer" style={{ justifyContent: "flex-start", gap: 10 }}>
+                    <button type="button" onClick={() => void createPayMongoLink()} className="pos-split-add" disabled={paymongoLoading}>
+                      {paymongoLoading ? "Generating..." : `Generate ${selectedMethod === "card" ? "Card" : "Bank"} Checkout`}
+                    </button>
+                    {paymongoLink?.method === selectedMethod ? (
+                      <button type="button" onClick={() => void refreshPayMongoStatus()} className="pos-split-add" disabled={paymongoLoading}>
+                        {paymongoLoading ? "Checking..." : "Refresh Status"}
+                      </button>
+                    ) : null}
+                  </div>
+                  {paymongoLink?.method === selectedMethod ? (
+                    <div className="pos-pay-warning" style={{ display: "grid", gap: 8 }}>
+                      <span>Reference: <strong>{paymongoLink.referenceNumber}</strong></span>
+                      <span>Status: <strong>{paymongoLink.paid ? "Paid" : paymongoLink.status}</strong></span>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="pos-split-add"
+                          onClick={() => window.open(paymongoLink.checkoutUrl, "_blank", "noopener,noreferrer")}
+                        >
+                          Open Checkout
+                        </button>
+                      </div>
+                      <span>
+                        {selectedMethod === "card"
+                          ? "Use this hosted PayMongo checkout for card payments, then refresh status before confirming the sale."
+                          : "Use this hosted PayMongo checkout for bank transfer, then refresh status before confirming the sale."}
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="pos-pay-warning">
+                      Generate a hosted PayMongo checkout link for this payment method, let the customer complete payment, then refresh the status before confirming the sale.
+                    </p>
+                  )}
+                </>
               )}
 
               {selectedMethod === "customer_credit" && !customerId && (
@@ -284,7 +492,10 @@ export default function PaymentModal(props: Props) {
               )}
 
               {selectedMethod === "customer_credit" && customerId && (
-                <p className="pos-pay-warning">Customer credit posting is prepared but still Coming Soon until the client activates this flow.</p>
+                <p className="pos-pay-warning">
+                  Available credit: {fmt(customerCredit?.availableCredit ?? 0)}. Terms:
+                  {" "}{customerCredit?.defaultCreditTermsDays ?? 30} days.
+                </p>
               )}
             </div>
           )}
@@ -340,6 +551,12 @@ export default function PaymentModal(props: Props) {
               <AlertCircle size={15} /> {error}
             </div>
           )}
+
+          {!shiftId ? (
+            <div className="pos-pay-error">
+              <AlertCircle size={15} /> Open a cashier shift before processing payment.
+            </div>
+          ) : null}
         </div>
 
         <div className="pos-modal__foot">
@@ -348,7 +565,11 @@ export default function PaymentModal(props: Props) {
             type="button"
             className="pos-btn-primary"
             onClick={handlePay}
-            disabled={processing || (selectedMethod === "customer_credit" && !customerId) || isComingSoonMethod}
+            disabled={
+              processing ||
+              !shiftId ||
+              (selectedMethod === "customer_credit" && (!customerId || !customerCredit?.allowCredit))
+            }
           >
             {processing ? "Processing..." : <><CheckCircle2 size={16} /> Confirm Payment {fmt(total)}</>}
           </button>

@@ -1,276 +1,534 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle, CheckCircle, ChevronDown, Hash, Lock,
-  Plus, RefreshCw, Search, Shield, Trash2, User,
-  UserCheck, UserCog, UserX, X,
+  AlertTriangle,
+  CheckCircle2,
+  Hash,
+  Lock,
+  Plus,
+  RefreshCw,
+  Search,
+  Shield,
+  UserCog,
+  XCircle,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { useRbac } from "@/components/RbacProvider";
+import { ROLE_LABELS } from "@/lib/rbac";
+import { DEFAULT_POLICY, evaluatePassword, type PasswordPolicy } from "@/lib/auth-security";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface UserRow {
+type PermissionRow = {
   id: string;
-  username: string;
-  first_name: string;
-  last_name: string;
-  email: string;
-  is_active: boolean;
-  allow_login: boolean;
-  cashier_pin_hash: string | null;
-  two_factor_enabled: boolean;
-  created_at: string;
-  roles: { id: string; name: string; display_name: string } | null;
-  branches: { id: string; name: string } | null;
-}
+  module: string;
+  action: string;
+  description: string | null;
+};
 
-interface Role {
+type BranchRow = {
   id: string;
   name: string;
-  display_name: string;
+  code?: string | null;
+};
+
+type RoleRow = {
+  id: string;
+  name: string;
+  description: string | null;
+};
+
+type RestrictionShape = {
+  can_view_cost_price: boolean | null;
+  can_apply_discount: boolean | null;
+  can_void_sale: boolean | null;
+  can_refund: boolean | null;
+  can_edit_inventory: boolean | null;
+  can_delete_product: boolean | null;
+  can_approve_purchase_order: boolean | null;
+  can_view_reports: boolean | null;
+  allow_price_override: boolean | null;
+  allow_negative_inventory: boolean | null;
+  require_supervisor_for_discount: boolean;
+  require_supervisor_for_void: boolean;
+  require_supervisor_for_refund: boolean;
+  discount_limit_percent: number | null;
+  discount_limit_amount: number | null;
+  max_refund_amount: number | null;
+  restriction_notes: string | null;
+};
+
+type UserRow = {
+  id: string;
+  first_name: string | null;
+  last_name: string | null;
+  username: string;
+  email: string;
+  phone: string | null;
+  employee_id: string | null;
+  role_id: string | null;
+  role_name: string | null;
+  branch_id: string | null;
+  branch_name: string | null;
+  data_access_scope: string | null;
+  is_active: boolean | null;
+  allow_login: boolean | null;
+  two_factor_enabled: boolean | null;
+  has_cashier_pin: boolean;
+  last_login_at: string | null;
+  created_at: string;
+  effective_permissions: string[];
+  permission_overrides: Record<string, { id: string; isAllowed: boolean; notes: string | null }>;
+} & RestrictionShape;
+
+type ActivityRow = {
+  user_id: string;
+  event_source: string;
+  event_action: string;
+  event_type: string;
+  event_payload?: Record<string, unknown> | null;
+  event_at: string;
+};
+
+type ToastState = { ok: boolean; message: string } | null;
+
+type UpdateUserDraft = {
+  userId: string;
+  firstName: string;
+  lastName: string;
+  username: string;
+  email: string;
+  phone: string;
+  employeeId: string;
+  roleId: string;
+  branchId: string;
+  dataAccessScope: string;
+  isActive: boolean;
+  allowLogin: boolean;
+};
+
+const restrictionPermissionKeys = {
+  can_view_cost_price: "inventory:view_cost_price",
+  can_apply_discount: "pos:apply_discount",
+  can_void_sale: "pos:void",
+  can_refund: "returns:refund",
+  can_edit_inventory: "inventory:edit",
+  can_delete_product: "inventory:delete",
+  can_approve_purchase_order: "purchasing:approve",
+  can_view_reports: "reports:view",
+} as const;
+
+const emptyRestrictions: RestrictionShape = {
+  can_view_cost_price: null,
+  can_apply_discount: null,
+  can_void_sale: null,
+  can_refund: null,
+  can_edit_inventory: null,
+  can_delete_product: null,
+  can_approve_purchase_order: null,
+  can_view_reports: null,
+  allow_price_override: null,
+  allow_negative_inventory: null,
+  require_supervisor_for_discount: false,
+  require_supervisor_for_void: false,
+  require_supervisor_for_refund: false,
+  discount_limit_percent: null,
+  discount_limit_amount: null,
+  max_refund_amount: null,
+  restriction_notes: null,
+};
+
+function formatRole(name: string | null | undefined) {
+  if (!name) return "No role";
+  return ROLE_LABELS[name] ?? name.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-// ─── Toast helper ─────────────────────────────────────────────────────────────
+function formatDate(value: string | null | undefined) {
+  if (!value) return "Never";
+  return new Date(value).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" });
+}
 
-type Toast = { id: number; ok: boolean; msg: string };
-
-// ─── Main Page ────────────────────────────────────────────────────────────────
+function normalizeUser(row: Record<string, unknown>): UserRow {
+  return {
+    id: String(row.id),
+    first_name: typeof row.first_name === "string" ? row.first_name : null,
+    last_name: typeof row.last_name === "string" ? row.last_name : null,
+    username: String(row.username ?? ""),
+    email: String(row.email ?? ""),
+    phone: typeof row.phone === "string" ? row.phone : null,
+    employee_id: typeof row.employee_id === "string" ? row.employee_id : null,
+    role_id: typeof row.role_id === "string" ? row.role_id : null,
+    role_name: typeof row.role_name === "string" ? row.role_name : null,
+    branch_id: typeof row.branch_id === "string" ? row.branch_id : null,
+    branch_name: typeof row.branch_name === "string" ? row.branch_name : null,
+    data_access_scope: typeof row.data_access_scope === "string" ? row.data_access_scope : "branch_only",
+    is_active: row.is_active !== false,
+    allow_login: row.allow_login !== false,
+    two_factor_enabled: Boolean(row.two_factor_enabled),
+    has_cashier_pin: Boolean(row.has_cashier_pin),
+    last_login_at: typeof row.last_login_at === "string" ? row.last_login_at : null,
+    created_at: String(row.created_at ?? ""),
+    effective_permissions: Array.isArray(row.effective_permissions) ? row.effective_permissions.map(String) : [],
+    permission_overrides: (row.permission_overrides as UserRow["permission_overrides"]) ?? {},
+    can_view_cost_price: (row.can_view_cost_price as boolean | null) ?? null,
+    can_apply_discount: (row.can_apply_discount as boolean | null) ?? null,
+    can_void_sale: (row.can_void_sale as boolean | null) ?? null,
+    can_refund: (row.can_refund as boolean | null) ?? null,
+    can_edit_inventory: (row.can_edit_inventory as boolean | null) ?? null,
+    can_delete_product: (row.can_delete_product as boolean | null) ?? null,
+    can_approve_purchase_order: (row.can_approve_purchase_order as boolean | null) ?? null,
+    can_view_reports: (row.can_view_reports as boolean | null) ?? null,
+    allow_price_override: (row.allow_price_override as boolean | null) ?? null,
+    allow_negative_inventory: (row.allow_negative_inventory as boolean | null) ?? null,
+    require_supervisor_for_discount: Boolean(row.require_supervisor_for_discount),
+    require_supervisor_for_void: Boolean(row.require_supervisor_for_void),
+    require_supervisor_for_refund: Boolean(row.require_supervisor_for_refund),
+    discount_limit_percent: row.discount_limit_percent === null ? null : Number(row.discount_limit_percent ?? null),
+    discount_limit_amount: row.discount_limit_amount === null ? null : Number(row.discount_limit_amount ?? null),
+    max_refund_amount: row.max_refund_amount === null ? null : Number(row.max_refund_amount ?? null),
+    restriction_notes: typeof row.restriction_notes === "string" ? row.restriction_notes : null,
+  };
+}
 
 export default function UsersRolesPage() {
-  const { role: callerRole } = useRbac();
-  const isAdmin = callerRole?.name === "super_admin" || callerRole?.name === "admin";
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [securityPolicy, setSecurityPolicy] = useState<PasswordPolicy>(DEFAULT_POLICY);
+  const [toast, setToast] = useState<ToastState>(null);
+  const [search, setSearch] = useState("");
+  const [roles, setRoles] = useState<RoleRow[]>([]);
+  const [branches, setBranches] = useState<BranchRow[]>([]);
+  const [permissions, setPermissions] = useState<PermissionRow[]>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
+  const [activities, setActivities] = useState<ActivityRow[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const selectedUserIdRef = useRef("");
+  const [pinValue, setPinValue] = useState("");
+  const [pinMode, setPinMode] = useState<"set" | "clear" | null>(null);
+  const [createForm, setCreateForm] = useState({
+    firstName: "",
+    lastName: "",
+    username: "",
+    email: "",
+    phone: "",
+    employeeId: "",
+    password: "",
+    roleId: "",
+    branchId: "",
+    dataAccessScope: "branch_only",
+  });
+  const [draftUser, setDraftUser] = useState<UpdateUserDraft | null>(null);
+  const [draftRestrictions, setDraftRestrictions] = useState<RestrictionShape>(emptyRestrictions);
 
-  const [users,    setUsers]    = useState<UserRow[]>([]);
-  const [roles,    setRoles]    = useState<Role[]>([]);
-  const [loading,  setLoading]  = useState(true);
-  const [search,   setSearch]   = useState("");
-  const [toasts,   setToasts]   = useState<Toast[]>([]);
-  const [toastId,  setToastId]  = useState(0);
+  function selectUser(user: UserRow | null) {
+    if (!user) {
+      setSelectedUserId("");
+      selectedUserIdRef.current = "";
+      setDraftUser(null);
+      setDraftRestrictions(emptyRestrictions);
+      return;
+    }
 
-  // Modals
-  const [pinModal,     setPinModal]     = useState<UserRow | null>(null);
-  const [pinValue,     setPinValue]     = useState("");
-  const [pinLoading,   setPinLoading]   = useState(false);
-  const [pinConfirm,   setPinConfirm]   = useState("");
-  const [clearTarget,  setClearTarget]  = useState<UserRow | null>(null);
+    setSelectedUserId(user.id);
+    selectedUserIdRef.current = user.id;
+    setDraftUser({
+      userId: user.id,
+      firstName: user.first_name ?? "",
+      lastName: user.last_name ?? "",
+      username: user.username,
+      email: user.email,
+      phone: user.phone ?? "",
+      employeeId: user.employee_id ?? "",
+      roleId: user.role_id ?? "",
+      branchId: user.branch_id ?? "",
+      dataAccessScope: user.data_access_scope ?? "branch_only",
+      isActive: user.is_active !== false,
+      allowLogin: user.allow_login !== false,
+    });
+    setDraftRestrictions({
+      ...emptyRestrictions,
+      ...user,
+    });
+  }
 
-  // ── Toast ─────────────────────────────────────────────────────────────────
-
-  const toast = (ok: boolean, msg: string) => {
-    const id = toastId + 1;
-    setToastId(id);
-    setToasts(t => [...t, { id, ok, msg }]);
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000);
-  };
-
-  // ── Load data ─────────────────────────────────────────────────────────────
-
-  const loadUsers = useCallback(async () => {
+  const loadWorkspace = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from("users")
-      .select(`
-        id, username, first_name, last_name, email,
-        is_active, allow_login, cashier_pin_hash, two_factor_enabled, created_at,
-        roles(id, name, display_name),
-        branches(id, name)
-      `)
-      .order("created_at", { ascending: false });
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
-    setUsers((data ?? []) as unknown as UserRow[]);
+    const response = await fetch("/api/users-management", {
+      headers: {
+        Authorization: `Bearer ${session?.access_token}`,
+      },
+    });
+
+    const payload = (await response.json()) as {
+      users?: Record<string, unknown>[];
+      roles?: RoleRow[];
+      branches?: BranchRow[];
+      permissions?: PermissionRow[];
+      activities?: ActivityRow[];
+      securityPolicy?: PasswordPolicy;
+      error?: string;
+    };
+
+    if (!response.ok) {
+      setToast({ ok: false, message: payload.error ?? "Unable to load user management." });
+      setLoading(false);
+      return;
+    }
+
+    const nextUsers = (payload.users ?? []).map(normalizeUser);
+    setUsers(nextUsers);
+    setRoles(payload.roles ?? []);
+    setBranches(payload.branches ?? []);
+    setPermissions(payload.permissions ?? []);
+    setActivities(payload.activities ?? []);
+    setSecurityPolicy(payload.securityPolicy ?? DEFAULT_POLICY);
+    const preservedUser = nextUsers.find((user) => user.id === selectedUserIdRef.current) ?? nextUsers[0] ?? null;
+    selectUser(preservedUser);
     setLoading(false);
   }, []);
 
-  const loadRoles = useCallback(async () => {
-    const { data } = await supabase
-      .from("roles")
-      .select("id, name, display_name")
-      .order("name");
-    setRoles((data ?? []) as Role[]);
-  }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadWorkspace();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [loadWorkspace]);
+
+  const selectedUser = useMemo(
+    () => users.find((user) => user.id === selectedUserId) ?? null,
+    [selectedUserId, users],
+  );
 
   useEffect(() => {
-    void loadUsers();
-    void loadRoles();
-  }, [loadUsers, loadRoles]);
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
-  // ── Toggle active ─────────────────────────────────────────────────────────
+  const filteredUsers = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return users;
+    return users.filter((user) =>
+      [
+        user.first_name,
+        user.last_name,
+        user.username,
+        user.email,
+        user.role_name,
+        user.branch_name,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(needle)),
+    );
+  }, [search, users]);
 
-  const toggleActive = async (u: UserRow) => {
-    const { error } = await supabase
-      .from("users")
-      .update({ is_active: !u.is_active, updated_at: new Date().toISOString() })
-      .eq("id", u.id);
+  const selectedActivities = useMemo(
+    () => activities.filter((item) => item.user_id === selectedUserId).slice(0, 12),
+    [activities, selectedUserId],
+  );
 
-    if (error) { toast(false, "Failed to update status."); return; }
-    toast(true, `${u.username} ${!u.is_active ? "activated" : "deactivated"}.`);
-    void loadUsers();
-  };
+  async function postAction(body: Record<string, unknown>, successMessage: string) {
+    setSaving(true);
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
-  // ── Toggle allow_login ────────────────────────────────────────────────────
-
-  const toggleLogin = async (u: UserRow) => {
-    const { error } = await supabase
-      .from("users")
-      .update({ allow_login: !u.allow_login, updated_at: new Date().toISOString() })
-      .eq("id", u.id);
-
-    if (error) { toast(false, "Failed to update login access."); return; }
-    toast(true, `Login ${!u.allow_login ? "enabled" : "disabled"} for ${u.username}.`);
-    void loadUsers();
-  };
-
-  // ── Change role ───────────────────────────────────────────────────────────
-
-  const changeRole = async (u: UserRow, roleId: string) => {
-    const { error } = await supabase
-      .from("users")
-      .update({ role_id: roleId, updated_at: new Date().toISOString() })
-      .eq("id", u.id);
-
-    if (error) { toast(false, "Failed to update role."); return; }
-    const roleName = roles.find(r => r.id === roleId)?.display_name ?? roleId;
-    toast(true, `${u.username} → ${roleName}`);
-    void loadUsers();
-  };
-
-  // ── Set PIN ───────────────────────────────────────────────────────────────
-
-  const handleSetPin = async () => {
-    if (!pinModal) return;
-    if (!/^\d{4,8}$/.test(pinValue)) {
-      toast(false, "PIN must be 4–8 digits only."); return;
-    }
-    if (pinValue !== pinConfirm) {
-      toast(false, "PINs do not match."); return;
-    }
-
-    setPinLoading(true);
-    const { data: { session } } = await supabase.auth.getSession();
-    const res = await fetch("/api/auth/set-pin", {
+    const response = await fetch("/api/users-management", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${session?.access_token}`,
       },
-      body: JSON.stringify({ user_id: pinModal.id, pin: pinValue, action: "set" }),
+      body: JSON.stringify(body),
     });
-    const json = await res.json() as { ok?: boolean; error?: string; message?: string };
-    if (!res.ok || !json.ok) {
-      toast(false, json.error ?? "Failed to set PIN.");
-    } else {
-      toast(true, json.message ?? "PIN set successfully.");
-      setPinModal(null);
+
+    const payload = (await response.json()) as { error?: string; message?: string };
+    setSaving(false);
+
+    if (!response.ok) {
+      setToast({ ok: false, message: payload.error ?? "Request failed." });
+      return false;
+    }
+
+    setToast({ ok: true, message: payload.message ?? successMessage });
+    await loadWorkspace();
+    return true;
+  }
+
+  async function handleCreateUser() {
+    const passwordIssues = evaluatePassword(createForm.password, securityPolicy).issues;
+    if (passwordIssues.length > 0) {
+      setToast({ ok: false, message: `Temporary password requirements: ${passwordIssues.join(", ")}.` });
+      return;
+    }
+
+    const created = await postAction({ action: "create_user", createUser: createForm }, "Staff account created.");
+    if (created) {
+      setCreateForm({
+        firstName: "",
+        lastName: "",
+        username: "",
+        email: "",
+        phone: "",
+        employeeId: "",
+        password: "",
+        roleId: "",
+        branchId: "",
+        dataAccessScope: "branch_only",
+      });
+    }
+  }
+
+  async function handleSaveUser() {
+    if (!draftUser) return;
+    await postAction({ action: "update_user", updateUser: draftUser }, "User updated.");
+  }
+
+  async function handleSaveRestrictions() {
+    if (!selectedUser) return;
+    await postAction(
+      { action: "update_sales_restrictions", userId: selectedUser.id, restrictions: draftRestrictions },
+      "Sales restrictions updated.",
+    );
+  }
+
+  async function handlePermissionChange(permissionId: string, value: string) {
+    if (!selectedUser) return;
+    if (value === "inherit") {
+      await postAction(
+        { action: "set_permission_override", userId: selectedUser.id, permissionId, clear: true },
+        "Permission override removed.",
+      );
+      return;
+    }
+
+    await postAction(
+      {
+        action: "set_permission_override",
+        userId: selectedUser.id,
+        permissionId,
+        isAllowed: value === "allow",
+      },
+      "Permission override updated.",
+    );
+  }
+
+  async function handlePinAction() {
+    if (!selectedUser || !pinMode) return;
+    if (pinMode === "set" && !new RegExp(`^\\d{${securityPolicy.pin_length},8}$`).test(pinValue)) {
+      setToast({ ok: false, message: `PIN must be ${securityPolicy.pin_length} to 8 digits.` });
+      return;
+    }
+
+    const ok = await postAction(
+      { action: "set_pin", userId: selectedUser.id, pin: pinMode === "set" ? pinValue : undefined, clear: pinMode === "clear" },
+      pinMode === "set" ? "PIN saved." : "PIN cleared.",
+    );
+
+    if (ok) {
+      setPinMode(null);
       setPinValue("");
-      setPinConfirm("");
-      void loadUsers();
     }
-    setPinLoading(false);
-  };
-
-  // ── Clear PIN ─────────────────────────────────────────────────────────────
-
-  const handleClearPin = async (u: UserRow) => {
-    const { data: { session } } = await supabase.auth.getSession();
-    const res = await fetch("/api/auth/set-pin", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session?.access_token}`,
-      },
-      body: JSON.stringify({ user_id: u.id, action: "clear" }),
-    });
-    const json = await res.json() as { ok?: boolean; error?: string; message?: string };
-    if (!res.ok || !json.ok) {
-      toast(false, json.error ?? "Failed to clear PIN.");
-    } else {
-      toast(true, `PIN cleared for ${u.username}.`);
-      setClearTarget(null);
-      void loadUsers();
-    }
-  };
-
-  // ── Filtered users ────────────────────────────────────────────────────────
-
-  const filtered = users.filter(u => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      u.username?.toLowerCase().includes(q) ||
-      u.email?.toLowerCase().includes(q) ||
-      u.first_name?.toLowerCase().includes(q) ||
-      u.last_name?.toLowerCase().includes(q) ||
-      u.roles?.display_name?.toLowerCase().includes(q)
-    );
-  });
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  const roleBadge = (roleName: string) => {
-    const map: Record<string, { bg: string; color: string }> = {
-      super_admin: { bg: "rgba(168,85,247,.12)", color: "#9333ea" },
-      admin:       { bg: "rgba(59,130,246,.12)",  color: "#2563eb" },
-      manager:     { bg: "rgba(16,185,129,.12)",  color: "#059669" },
-      cashier:     { bg: "rgba(245,158,11,.12)",  color: "#d97706" },
-      stock_clerk: { bg: "rgba(100,116,139,.12)", color: "#475569" },
-    };
-    const s = map[roleName] ?? { bg: "rgba(148,163,184,.12)", color: "#64748b" };
-    return (
-      <span style={{
-        background: s.bg, color: s.color,
-        borderRadius: 6, padding: "2px 9px",
-        fontSize: 11, fontWeight: 700, whiteSpace: "nowrap",
-      }}>
-        {roleName.replace("_", " ").replace(/\b\w/g, c => c.toUpperCase())}
-      </span>
-    );
-  };
-
-  // ─── Render ───────────────────────────────────────────────────────────────
+  }
 
   return (
     <div className="ur-page">
-
-      {/* Header */}
       <div className="ur-page__header">
         <div className="ur-page__header-left">
           <UserCog size={22} className="ur-page__header-icon" />
           <div>
-            <h2 className="ur-page__title">Users &amp; Roles</h2>
-            <p className="ur-page__sub">Manage accounts, roles, login access and cashier PINs</p>
+            <h2 className="ur-page__title">User Management & Permissions</h2>
+            <p className="ur-page__sub">Create staff accounts, assign branches and roles, control permissions, set cashier PINs, and review activity logs.</p>
           </div>
         </div>
+        <button className="ur-btn ur-btn--seed" onClick={() => void loadWorkspace()} disabled={loading || saving}>
+          <RefreshCw size={14} className={loading ? "spin" : ""} /> Refresh
+        </button>
       </div>
 
-      {/* Search bar */}
-      <div className="ur-page__toolbar">
-        <div className="ur-page__search">
-          <Search size={14} />
-          <input
-            id="input-user-search"
-            type="text"
-            placeholder="Search by name, email, username or role…"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
-          {search && (
-            <button onClick={() => setSearch("")} className="ur-page__search-clear">
-              <X size={12} />
-            </button>
-          )}
+      <div className="ur-page__card" style={{ marginBottom: 16 }}>
+        <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+          <label className="login-form__field">
+            <span className="login-form__label">First Name</span>
+            <input value={createForm.firstName} onChange={(event) => setCreateForm((current) => ({ ...current, firstName: event.target.value }))} />
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Last Name</span>
+            <input value={createForm.lastName} onChange={(event) => setCreateForm((current) => ({ ...current, lastName: event.target.value }))} />
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Username</span>
+            <input value={createForm.username} onChange={(event) => setCreateForm((current) => ({ ...current, username: event.target.value }))} />
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Email</span>
+            <input value={createForm.email} onChange={(event) => setCreateForm((current) => ({ ...current, email: event.target.value }))} />
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Temp Password</span>
+            <input type="password" value={createForm.password} onChange={(event) => setCreateForm((current) => ({ ...current, password: event.target.value }))} />
+            {createForm.password ? (
+              <small style={{ color: "#64748b" }}>
+                {evaluatePassword(createForm.password, securityPolicy).issues.length === 0
+                  ? "Password meets current policy."
+                  : `Needs: ${evaluatePassword(createForm.password, securityPolicy).issues.join(", ")}`}
+              </small>
+            ) : (
+              <small style={{ color: "#64748b" }}>
+                Policy: {securityPolicy.password_min_length}+ chars
+                {securityPolicy.password_require_uppercase ? ", uppercase" : ""}
+                {securityPolicy.password_require_number ? ", number" : ""}
+                {securityPolicy.password_require_symbol ? ", symbol" : ""}
+              </small>
+            )}
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Role</span>
+            <select value={createForm.roleId} onChange={(event) => setCreateForm((current) => ({ ...current, roleId: event.target.value }))}>
+              <option value="">Select role</option>
+              {roles.map((role) => (
+                <option key={role.id} value={role.id}>{formatRole(role.name)}</option>
+              ))}
+            </select>
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Branch</span>
+            <select value={createForm.branchId} onChange={(event) => setCreateForm((current) => ({ ...current, branchId: event.target.value }))}>
+              <option value="">All branches</option>
+              {branches.map((branch) => (
+                <option key={branch.id} value={branch.id}>{branch.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Phone</span>
+            <input value={createForm.phone} onChange={(event) => setCreateForm((current) => ({ ...current, phone: event.target.value }))} />
+          </label>
+          <label className="login-form__field">
+            <span className="login-form__label">Employee ID</span>
+            <input value={createForm.employeeId} onChange={(event) => setCreateForm((current) => ({ ...current, employeeId: event.target.value }))} />
+          </label>
         </div>
-        <span className="ur-page__count">{filtered.length} user{filtered.length !== 1 ? "s" : ""}</span>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+          <button className="login-form__submit" onClick={() => void handleCreateUser()} disabled={saving}>
+            <Plus size={14} /> Create Staff Account
+          </button>
+        </div>
       </div>
 
-      {/* Table */}
-      <div className="ur-page__card">
-        {loading ? (
-          <div className="ur-page__loading"><RefreshCw size={18} className="spin" /> Loading users…</div>
-        ) : filtered.length === 0 ? (
-          <div className="ur-page__empty">No users found.</div>
-        ) : (
+      <div style={{ display: "grid", gap: 16, gridTemplateColumns: "minmax(340px, 1.05fr) minmax(360px, 1fr)" }}>
+        <section className="ur-page__card">
+          <div className="ur-page__toolbar" style={{ marginBottom: 12 }}>
+            <div className="ur-page__search">
+              <Search size={14} />
+              <input placeholder="Search users, roles, or branches..." value={search} onChange={(event) => setSearch(event.target.value)} />
+            </div>
+            <span className="ur-page__count">{filteredUsers.length} users</span>
+          </div>
+
           <div className="ur-page__table-wrap">
             <table className="ur-table">
               <thead>
@@ -280,249 +538,218 @@ export default function UsersRolesPage() {
                   <th>Branch</th>
                   <th>Status</th>
                   <th>Login</th>
-                  <th>2FA</th>
                   <th>PIN</th>
-                  {isAdmin && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(u => (
-                  <tr key={u.id}>
-                    {/* User */}
+                {filteredUsers.map((user) => (
+                  <tr
+                    key={user.id}
+                    onClick={() => selectUser(user)}
+                    style={{ cursor: "pointer", background: user.id === selectedUserId ? "rgba(37,99,235,.06)" : undefined }}
+                  >
                     <td>
                       <div className="ur-table__user">
-                        <div className="ur-table__avatar">
-                          {(u.first_name?.[0] ?? u.username?.[0] ?? "?").toUpperCase()}
-                        </div>
+                        <div className="ur-table__avatar">{(user.first_name?.[0] ?? user.username[0] ?? "U").toUpperCase()}</div>
                         <div>
-                          <div className="ur-table__name">
-                            {u.first_name} {u.last_name}
-                          </div>
-                          <div className="ur-table__email">{u.username} · {u.email}</div>
+                          <div className="ur-table__name">{[user.first_name, user.last_name].filter(Boolean).join(" ") || user.username}</div>
+                          <div className="ur-table__email">{user.username} · {user.email}</div>
                         </div>
                       </div>
                     </td>
-
-                    {/* Role */}
-                    <td>
-                      {isAdmin ? (
-                        <div className="ur-table__role-select">
-                          <select
-                            id={`select-role-${u.id}`}
-                            value={u.roles?.id ?? ""}
-                            onChange={e => changeRole(u, e.target.value)}
-                            className="ur-table__select"
-                          >
-                            <option value="" disabled>No role</option>
-                            {roles.map(r => (
-                              <option key={r.id} value={r.id}>{r.display_name}</option>
-                            ))}
-                          </select>
-                          <ChevronDown size={12} className="ur-table__select-icon" />
-                        </div>
-                      ) : (
-                        roleBadge(u.roles?.name ?? "")
-                      )}
-                    </td>
-
-                    {/* Branch */}
-                    <td className="ur-table__branch">
-                      {u.branches?.name ?? <span style={{ color: "#94a3b8" }}>All</span>}
-                    </td>
-
-                    {/* Active status */}
-                    <td>
-                      <button
-                        id={`btn-toggle-active-${u.id}`}
-                        className={`ur-table__pill ${u.is_active ? "ur-table__pill--green" : "ur-table__pill--red"}`}
-                        onClick={() => isAdmin && toggleActive(u)}
-                        disabled={!isAdmin}
-                        title={isAdmin ? "Click to toggle" : ""}
-                      >
-                        {u.is_active ? <UserCheck size={11} /> : <UserX size={11} />}
-                        {u.is_active ? "Active" : "Inactive"}
-                      </button>
-                    </td>
-
-                    {/* Allow login */}
-                    <td>
-                      <button
-                        id={`btn-toggle-login-${u.id}`}
-                        className={`ur-table__pill ${u.allow_login ? "ur-table__pill--blue" : "ur-table__pill--gray"}`}
-                        onClick={() => isAdmin && toggleLogin(u)}
-                        disabled={!isAdmin}
-                        title={isAdmin ? "Click to toggle" : ""}
-                      >
-                        {u.allow_login ? <Lock size={11} /> : <X size={11} />}
-                        {u.allow_login ? "Allowed" : "Blocked"}
-                      </button>
-                    </td>
-
-                    {/* 2FA */}
-                    <td>
-                      <span className={`ur-table__pill ur-table__pill--static ${u.two_factor_enabled ? "ur-table__pill--green" : "ur-table__pill--gray"}`}>
-                        <Shield size={11} />
-                        {u.two_factor_enabled ? "On" : "Off"}
-                      </span>
-                    </td>
-
-                    {/* PIN */}
-                    <td>
-                      {u.cashier_pin_hash ? (
-                        <span className="ur-table__pill ur-table__pill--static ur-table__pill--green">
-                          <Hash size={11} /> Set
-                        </span>
-                      ) : (
-                        <span className="ur-table__pill ur-table__pill--static ur-table__pill--gray">
-                          <Hash size={11} /> Not Set
-                        </span>
-                      )}
-                    </td>
-
-                    {/* Actions */}
-                    {isAdmin && (
-                      <td>
-                        <div className="ur-table__actions">
-                          <button
-                            id={`btn-set-pin-${u.id}`}
-                            className="ur-table__action-btn ur-table__action-btn--pin"
-                            onClick={() => { setPinModal(u); setPinValue(""); setPinConfirm(""); }}
-                            title="Set cashier PIN"
-                          >
-                            <Hash size={13} />
-                            {u.cashier_pin_hash ? "Change PIN" : "Set PIN"}
-                          </button>
-                          {u.cashier_pin_hash && (
-                            <button
-                              id={`btn-clear-pin-${u.id}`}
-                              className="ur-table__action-btn ur-table__action-btn--danger"
-                              onClick={() => setClearTarget(u)}
-                              title="Remove PIN"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    )}
+                    <td>{formatRole(user.role_name)}</td>
+                    <td>{user.branch_name ?? "All branches"}</td>
+                    <td>{user.is_active !== false ? "Active" : "Inactive"}</td>
+                    <td>{user.allow_login !== false ? "Allowed" : "Blocked"}</td>
+                    <td>{user.has_cashier_pin ? "Set" : "Not set"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        )}
-      </div>
+        </section>
 
-      {/* ── Set PIN Modal ─────────────────────────────────────────────────── */}
-      {pinModal && (
-        <div className="auth-modal__backdrop" role="dialog" aria-modal="true">
-          <div className="auth-modal" style={{ textAlign: "left" }}>
-            <button className="auth-modal__close" onClick={() => setPinModal(null)}><X size={16} /></button>
+        <section className="ur-page__card">
+          {!selectedUser || !draftUser ? (
+            <div className="ur-page__empty">Select a user to manage profile settings, permissions, restrictions, and activity.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 18 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 18 }}>{[selectedUser.first_name, selectedUser.last_name].filter(Boolean).join(" ") || selectedUser.username}</h3>
+                <p style={{ margin: "6px 0 0", color: "#64748b", fontSize: 13 }}>
+                  Last login: {formatDate(selectedUser.last_login_at)} · 2FA {selectedUser.two_factor_enabled ? "enabled" : "disabled"}
+                </p>
+              </div>
 
-            <div className="auth-modal__icon auth-modal__icon--blue" style={{ marginBottom: 14 }}>
-              <Hash size={26} />
-            </div>
-            <h3 className="auth-modal__title" style={{ textAlign: "center" }}>
-              {pinModal.cashier_pin_hash ? "Change PIN" : "Set Cashier PIN"}
-            </h3>
-            <p style={{ textAlign: "center", color: "#64748b", fontSize: 12.5, marginBottom: 20 }}>
-              Setting PIN for <strong>{pinModal.first_name} {pinModal.last_name}</strong>
-              {" "}(<code style={{ background: "#f1f5f9", padding: "1px 5px", borderRadius: 4 }}>{pinModal.username}</code>)
-            </p>
+              <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))" }}>
+                <label className="login-form__field"><span className="login-form__label">First Name</span><input value={draftUser.firstName} onChange={(event) => setDraftUser((current) => current ? { ...current, firstName: event.target.value } : current)} /></label>
+                <label className="login-form__field"><span className="login-form__label">Last Name</span><input value={draftUser.lastName} onChange={(event) => setDraftUser((current) => current ? { ...current, lastName: event.target.value } : current)} /></label>
+                <label className="login-form__field"><span className="login-form__label">Username</span><input value={draftUser.username} onChange={(event) => setDraftUser((current) => current ? { ...current, username: event.target.value } : current)} /></label>
+                <label className="login-form__field"><span className="login-form__label">Email</span><input value={draftUser.email} onChange={(event) => setDraftUser((current) => current ? { ...current, email: event.target.value } : current)} /></label>
+                <label className="login-form__field"><span className="login-form__label">Phone</span><input value={draftUser.phone} onChange={(event) => setDraftUser((current) => current ? { ...current, phone: event.target.value } : current)} /></label>
+                <label className="login-form__field"><span className="login-form__label">Employee ID</span><input value={draftUser.employeeId} onChange={(event) => setDraftUser((current) => current ? { ...current, employeeId: event.target.value } : current)} /></label>
+                <label className="login-form__field">
+                  <span className="login-form__label">Role</span>
+                  <select value={draftUser.roleId} onChange={(event) => setDraftUser((current) => current ? { ...current, roleId: event.target.value } : current)}>
+                    <option value="">No role</option>
+                    {roles.map((role) => <option key={role.id} value={role.id}>{formatRole(role.name)}</option>)}
+                  </select>
+                </label>
+                <label className="login-form__field">
+                  <span className="login-form__label">Branch</span>
+                  <select value={draftUser.branchId} onChange={(event) => setDraftUser((current) => current ? { ...current, branchId: event.target.value } : current)}>
+                    <option value="">All branches</option>
+                    {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+                  </select>
+                </label>
+              </div>
 
-            <div className="login-form__field" style={{ marginBottom: 14 }}>
-              <span className="login-form__label">New PIN (4–8 digits)</span>
-              <div className="login-form__input-wrap">
-                <Hash size={15} className="login-form__icon" />
-                <input
-                  id="input-new-pin"
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={8}
-                  placeholder="••••"
-                  value={pinValue}
-                  onChange={e => setPinValue(e.target.value.replace(/\D/g, ""))}
-                  disabled={pinLoading}
-                  autoFocus
-                />
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                <label><input type="checkbox" checked={draftUser.isActive} onChange={(event) => setDraftUser((current) => current ? { ...current, isActive: event.target.checked } : current)} /> Active</label>
+                <label><input type="checkbox" checked={draftUser.allowLogin} onChange={(event) => setDraftUser((current) => current ? { ...current, allowLogin: event.target.checked } : current)} /> Allow login</label>
+                <button className="login-form__submit" onClick={() => void handleSaveUser()} disabled={saving}>
+                  <CheckCircle2 size={14} /> Save Profile
+                </button>
+                <button className="login-form__submit" style={{ background: "#2563eb" }} onClick={() => setPinMode("set")} disabled={saving}>
+                  <Hash size={14} /> {selectedUser.has_cashier_pin ? "Change PIN" : "Set PIN"}
+                </button>
+                {selectedUser.has_cashier_pin ? (
+                  <button className="login-form__submit" style={{ background: "#dc2626" }} onClick={() => setPinMode("clear")} disabled={saving}>
+                    <XCircle size={14} /> Clear PIN
+                  </button>
+                ) : null}
+              </div>
+
+              {pinMode ? (
+                <div style={{ border: "1px solid #dbeafe", background: "#eff6ff", borderRadius: 12, padding: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <strong>{pinMode === "set" ? "Set cashier PIN" : "Clear cashier PIN"}</strong>
+                    <button type="button" onClick={() => { setPinMode(null); setPinValue(""); }} style={{ background: "transparent", border: 0, cursor: "pointer" }}>Close</button>
+                  </div>
+                  {pinMode === "set" ? (
+                    <input
+                      type="password"
+                      value={pinValue}
+                      inputMode="numeric"
+                      maxLength={8}
+                      placeholder={`${securityPolicy.pin_length} to 8 digits`}
+                      onChange={(event) => setPinValue(event.target.value.replace(/\D/g, ""))}
+                      style={{ width: "100%", marginBottom: 10 }}
+                    />
+                  ) : (
+                    <p style={{ margin: "0 0 10px", color: "#475569" }}>This removes quick cashier PIN login for this user.</p>
+                  )}
+                  <button className="login-form__submit" onClick={() => void handlePinAction()} disabled={saving}>
+                    <Lock size={14} /> Confirm
+                  </button>
+                </div>
+              ) : null}
+
+              <div>
+                <h4 style={{ margin: "0 0 8px" }}>Permission Matrix</h4>
+                <div style={{ maxHeight: 280, overflow: "auto", border: "1px solid #e2e8f0", borderRadius: 12 }}>
+                  <table className="ur-table">
+                    <thead>
+                      <tr>
+                        <th>Permission</th>
+                        <th>Effective</th>
+                        <th>Override</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {permissions.map((permission) => {
+                        const key = `${permission.module}:${permission.action}`;
+                        const effective = selectedUser.effective_permissions.includes(key);
+                        const override = selectedUser.permission_overrides[permission.id];
+                        return (
+                          <tr key={permission.id}>
+                            <td>
+                              <div style={{ fontWeight: 700 }}>{permission.module}:{permission.action}</div>
+                              <div style={{ fontSize: 12, color: "#64748b" }}>{permission.description}</div>
+                            </td>
+                            <td>{effective ? "Allowed" : "Blocked"}</td>
+                            <td>
+                              <select value={override ? (override.isAllowed ? "allow" : "deny") : "inherit"} onChange={(event) => void handlePermissionChange(permission.id, event.target.value)}>
+                                <option value="inherit">Inherit role</option>
+                                <option value="allow">Force allow</option>
+                                <option value="deny">Force deny</option>
+                              </select>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div>
+                <h4 style={{ margin: "0 0 8px" }}>Sales Restriction Settings</h4>
+                <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                  {Object.entries(restrictionPermissionKeys).map(([field, permissionKey]) => (
+                    <label key={field} className="login-form__field">
+                      <span className="login-form__label">{permissionKey}</span>
+                      <select
+                        value={draftRestrictions[field as keyof typeof restrictionPermissionKeys] === null ? "inherit" : draftRestrictions[field as keyof typeof restrictionPermissionKeys] ? "allow" : "deny"}
+                        onChange={(event) => setDraftRestrictions((current) => ({
+                          ...current,
+                          [field]:
+                            event.target.value === "inherit"
+                              ? null
+                              : event.target.value === "allow",
+                        }))}
+                      >
+                        <option value="inherit">Inherit</option>
+                        <option value="allow">Allow</option>
+                        <option value="deny">Deny</option>
+                      </select>
+                    </label>
+                  ))}
+                  <label className="login-form__field"><span className="login-form__label">Discount Limit %</span><input value={draftRestrictions.discount_limit_percent ?? ""} onChange={(event) => setDraftRestrictions((current) => ({ ...current, discount_limit_percent: event.target.value ? Number(event.target.value) : null }))} /></label>
+                  <label className="login-form__field"><span className="login-form__label">Discount Limit Amount</span><input value={draftRestrictions.discount_limit_amount ?? ""} onChange={(event) => setDraftRestrictions((current) => ({ ...current, discount_limit_amount: event.target.value ? Number(event.target.value) : null }))} /></label>
+                  <label className="login-form__field"><span className="login-form__label">Max Refund Amount</span><input value={draftRestrictions.max_refund_amount ?? ""} onChange={(event) => setDraftRestrictions((current) => ({ ...current, max_refund_amount: event.target.value ? Number(event.target.value) : null }))} /></label>
+                </div>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+                  <label><input type="checkbox" checked={draftRestrictions.require_supervisor_for_discount} onChange={(event) => setDraftRestrictions((current) => ({ ...current, require_supervisor_for_discount: event.target.checked }))} /> Require supervisor for discount</label>
+                  <label><input type="checkbox" checked={draftRestrictions.require_supervisor_for_void} onChange={(event) => setDraftRestrictions((current) => ({ ...current, require_supervisor_for_void: event.target.checked }))} /> Require supervisor for void</label>
+                  <label><input type="checkbox" checked={draftRestrictions.require_supervisor_for_refund} onChange={(event) => setDraftRestrictions((current) => ({ ...current, require_supervisor_for_refund: event.target.checked }))} /> Require supervisor for refund</label>
+                  <label><input type="checkbox" checked={draftRestrictions.allow_price_override === true} onChange={(event) => setDraftRestrictions((current) => ({ ...current, allow_price_override: event.target.checked }))} /> Allow price override</label>
+                  <label><input type="checkbox" checked={draftRestrictions.allow_negative_inventory === true} onChange={(event) => setDraftRestrictions((current) => ({ ...current, allow_negative_inventory: event.target.checked }))} /> Allow negative inventory</label>
+                </div>
+                <label className="login-form__field" style={{ marginTop: 10 }}>
+                  <span className="login-form__label">Restriction Notes</span>
+                  <textarea value={draftRestrictions.restriction_notes ?? ""} onChange={(event) => setDraftRestrictions((current) => ({ ...current, restriction_notes: event.target.value }))} rows={3} />
+                </label>
+                <button className="login-form__submit" onClick={() => void handleSaveRestrictions()} disabled={saving}>
+                  <Shield size={14} /> Save Restrictions
+                </button>
+              </div>
+
+              <div>
+                <h4 style={{ margin: "0 0 8px" }}>Activity Logs</h4>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {selectedActivities.length ? selectedActivities.map((activity, index) => (
+                    <div key={`${activity.event_source}-${index}`} style={{ padding: 12, border: "1px solid #e2e8f0", borderRadius: 12 }}>
+                      <div style={{ fontWeight: 700 }}>{activity.event_source} · {activity.event_type}</div>
+                      <div style={{ fontSize: 13, color: "#475569" }}>{activity.event_action}</div>
+                      <div style={{ fontSize: 12, color: "#94a3b8" }}>{formatDate(activity.event_at)}</div>
+                    </div>
+                  )) : (
+                    <div className="ur-page__empty">No recent activity for this user.</div>
+                  )}
+                </div>
               </div>
             </div>
-
-            <div className="login-form__field" style={{ marginBottom: 20 }}>
-              <span className="login-form__label">Confirm PIN</span>
-              <div className="login-form__input-wrap">
-                <Hash size={15} className="login-form__icon" />
-                <input
-                  id="input-confirm-pin"
-                  type="password"
-                  inputMode="numeric"
-                  maxLength={8}
-                  placeholder="••••"
-                  value={pinConfirm}
-                  onChange={e => setPinConfirm(e.target.value.replace(/\D/g, ""))}
-                  disabled={pinLoading}
-                />
-              </div>
-              {pinConfirm && pinValue !== pinConfirm && (
-                <p className="reset-pw__mismatch">PINs do not match.</p>
-              )}
-            </div>
-
-            <button
-              id="btn-confirm-set-pin"
-              className="login-form__submit"
-              disabled={pinLoading || pinValue.length < 4 || pinValue !== pinConfirm}
-              onClick={handleSetPin}
-            >
-              {pinLoading ? <RefreshCw size={15} className="spin" /> : <CheckCircle size={15} />}
-              <span>{pinLoading ? "Saving…" : "Save PIN"}</span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Clear PIN Confirm ─────────────────────────────────────────────── */}
-      {clearTarget && (
-        <div className="auth-modal__backdrop" role="dialog" aria-modal="true">
-          <div className="auth-modal">
-            <div className="auth-modal__icon auth-modal__icon--amber">
-              <AlertTriangle size={26} />
-            </div>
-            <h3 className="auth-modal__title">Remove PIN?</h3>
-            <p className="auth-modal__body">
-              This will remove the cashier PIN for <strong>{clearTarget.username}</strong>.
-              They will no longer be able to log in via PIN.
-            </p>
-            <div style={{ display: "flex", gap: 10 }}>
-              <button
-                id="btn-confirm-clear-pin"
-                className="login-form__submit"
-                style={{ flex: 1, background: "#ef4444" }}
-                onClick={() => handleClearPin(clearTarget)}
-              >
-                <Trash2 size={15} /> Remove PIN
-              </button>
-              <button
-                className="login-form__submit"
-                style={{ flex: 1, background: "#64748b" }}
-                onClick={() => setClearTarget(null)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Toast stack ───────────────────────────────────────────────────── */}
-      <div className="ur-toast-stack">
-        {toasts.map(t => (
-          <div key={t.id} className={`ur-toast ${t.ok ? "ur-toast--ok" : "ur-toast--err"}`}>
-            {t.ok ? <CheckCircle size={15} /> : <AlertTriangle size={15} />}
-            <span>{t.msg}</span>
-          </div>
-        ))}
+          )}
+        </section>
       </div>
+
+      {toast ? (
+        <div className={`ur-toast ${toast.ok ? "ur-toast--ok" : "ur-toast--err"}`} style={{ position: "fixed", right: 18, bottom: 18, zIndex: 50 }}>
+          {toast.ok ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+          <span>{toast.message}</span>
+        </div>
+      ) : null}
     </div>
   );
 }

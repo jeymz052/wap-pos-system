@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { applyInventoryMovement } from "@/lib/inventory-admin";
+import { notifyUnusualDiscount } from "@/lib/notifications";
+import { getAuthenticatedUser, hasAnyPermission } from "@/lib/server-auth";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getAccessProfileByProfileId } from "@/lib/user-access";
 
 type SaleItemInput = {
   productId: string;
@@ -14,36 +17,33 @@ type SaleItemInput = {
   costPrice?: number;
 };
 
+type PaymentInput = {
+  method: string;
+  amount: number;
+  referenceNo?: string;
+};
+
+function parseNumber(value: unknown) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
 async function getCashierPermissions(cashierId: string) {
-  const { data: cashier, error: cashierError } = await supabaseAdmin
-    .from("users")
-    .select("role_id")
-    .eq("id", cashierId)
-    .maybeSingle();
-
-  if (cashierError) throw cashierError;
-  const roleId = (cashier as { role_id?: string | null } | null)?.role_id;
-  if (!roleId) return new Set<string>();
-
-  const { data: permissionRows, error: permissionError } = await supabaseAdmin
-    .from("role_permissions")
-    .select("is_allowed, permissions(module, action)")
-    .eq("role_id", roleId)
-    .eq("is_allowed", true);
-
-  if (permissionError) throw permissionError;
-
-  const permissions = new Set<string>();
-  (permissionRows as Array<{ permissions?: { module?: string | null; action?: string | null } | null }> | null ?? []).forEach((row) => {
-    const moduleName = row.permissions?.module;
-    const action = row.permissions?.action;
-    if (moduleName && action) permissions.add(`${moduleName}:${action}`);
-  });
-  return permissions;
+  const accessProfile = await getAccessProfileByProfileId(cashierId);
+  return accessProfile?.permissions ?? new Set<string>();
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const user = await getAuthenticatedUser(request);
+    if (!user || !hasAnyPermission(user, "pos:create", "pos:manage")) {
+      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+    }
+
     const body = await request.json();
     const {
       branchId,
@@ -68,10 +68,44 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing required fields." }, { status: 400 });
     }
 
+    if (user.profileId !== cashierId && !hasAnyPermission(user, "pos:manage")) {
+      return NextResponse.json({ error: "You cannot complete sales for another cashier." }, { status: 403 });
+    }
+
+    if (!shiftId) {
+      return NextResponse.json({ error: "An open shift is required before processing sales." }, { status: 400 });
+    }
+
+    const shiftCheckResult = await supabaseAdmin
+      .from("cash_shifts")
+      .select("id, branch_id, cashier_id, status")
+      .eq("id", shiftId)
+      .maybeSingle();
+
+    if (shiftCheckResult.error) throw shiftCheckResult.error;
+    if (!shiftCheckResult.data) {
+      return NextResponse.json({ error: "The selected shift was not found." }, { status: 404 });
+    }
+
+    const shift = shiftCheckResult.data as { id: string; branch_id: string; cashier_id: string; status: string };
+    if (shift.status !== "open") {
+      return NextResponse.json({ error: "Sales can only be processed on an open shift." }, { status: 400 });
+    }
+
+    if (shift.branch_id !== branchId || shift.cashier_id !== cashierId) {
+      return NextResponse.json({ error: "The active shift does not belong to this branch or cashier." }, { status: 400 });
+    }
+
     const itemInputs = items as SaleItemInput[];
-    const permissions = await getCashierPermissions(cashierId);
+    const paymentInputs = payments as PaymentInput[];
+    const cashierAccess = await getAccessProfileByProfileId(cashierId);
+    const permissions = cashierAccess?.permissions ?? new Set<string>();
+    const restrictions = cashierAccess?.salesRestrictions ?? null;
     const canApplyDiscount = permissions.has("pos:apply_discount") || permissions.has("pos:manage");
-    const canOverridePrice = permissions.has("pos:edit") || permissions.has("pos:manage");
+    const canOverridePrice =
+      permissions.has("pos:edit") ||
+      permissions.has("pos:manage") ||
+      restrictions?.allow_price_override === true;
 
     const hasOrderDiscount = Number(discountAmount ?? 0) > 0;
     const itemDiscountApproverIds = Array.from(new Set(itemInputs
@@ -88,6 +122,25 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if ((hasOrderDiscount || hasItemDiscount) && restrictions?.require_supervisor_for_discount) {
+      if (!itemDiscountApproverIds.length) {
+        return NextResponse.json({ error: "Supervisor approval is required for discounts on this cashier account." }, { status: 403 });
+      }
+    }
+
+    if (hasOrderDiscount && restrictions?.discount_limit_amount !== null && restrictions?.discount_limit_amount !== undefined) {
+      if (parseNumber(discountAmount) > restrictions.discount_limit_amount) {
+        return NextResponse.json({ error: "Discount amount exceeds the cashier limit." }, { status: 403 });
+      }
+    }
+
+    if (hasOrderDiscount && restrictions?.discount_limit_percent !== null && restrictions?.discount_limit_percent !== undefined) {
+      const requestedPercent = subtotal > 0 ? (parseNumber(discountAmount) / subtotal) * 100 : 0;
+      if (requestedPercent > restrictions.discount_limit_percent) {
+        return NextResponse.json({ error: "Discount percentage exceeds the cashier limit." }, { status: 403 });
+      }
+    }
+
     const { data: productRows, error: productError } = await supabaseAdmin
       .from("products")
       .select("id, selling_price")
@@ -95,10 +148,26 @@ export async function POST(request: NextRequest) {
 
     if (productError) throw productError;
 
+    const { data: branchPriceRows, error: branchPriceError } = await supabaseAdmin
+      .from("branch_product_prices")
+      .select("product_id, price")
+      .eq("branch_id", branchId)
+      .eq("is_active", true)
+      .in("product_id", itemInputs.map((item) => item.productId));
+
+    if (branchPriceError) throw branchPriceError;
+
+    const branchPriceMap = new Map(
+      ((branchPriceRows ?? []) as Array<{ product_id: string; price: number | string | null }>).map((row) => [
+        row.product_id,
+        Number(row.price ?? 0),
+      ]),
+    );
+
     const priceMap = new Map(
       ((productRows ?? []) as Array<{ id: string; selling_price: number | string | null }>).map((product) => [
         product.id,
-        Number(product.selling_price ?? 0),
+        branchPriceMap.get(product.id) ?? Number(product.selling_price ?? 0),
       ])
     );
 
@@ -121,6 +190,49 @@ export async function POST(request: NextRequest) {
       if (!approverHasEditPermission) {
         return NextResponse.json({ error: "Cashier is not allowed to override item prices." }, { status: 403 });
       }
+    }
+
+    const creditAmount = paymentInputs
+      .filter((payment) => payment.method === "customer_credit")
+      .reduce((sum, payment) => sum + parseNumber(payment.amount), 0);
+
+    let customerCreditTermsDays = 30;
+
+    if (creditAmount > 0) {
+      if (!customerId) {
+        return NextResponse.json({ error: "Customer credit requires a registered customer." }, { status: 400 });
+      }
+
+      const { data: customer, error: customerError } = await supabaseAdmin
+        .from("customers")
+        .select("id, name, allow_credit, credit_limit, current_balance, default_credit_terms_days")
+        .eq("id", customerId)
+        .maybeSingle();
+
+      if (customerError) throw customerError;
+      if (!customer) {
+        return NextResponse.json({ error: "Selected customer was not found." }, { status: 404 });
+      }
+
+      const allowCredit = (customer as { allow_credit?: boolean | null }).allow_credit ?? true;
+      if (!allowCredit) {
+        return NextResponse.json({ error: "This customer is not allowed to purchase on credit." }, { status: 400 });
+      }
+
+      const creditLimit = parseNumber((customer as { credit_limit?: number | string | null }).credit_limit);
+      const currentBalance = parseNumber((customer as { current_balance?: number | string | null }).current_balance);
+      const availableCredit = Math.max(0, creditLimit - currentBalance);
+
+      if (creditAmount > availableCredit) {
+        return NextResponse.json({
+          error: `Credit limit exceeded. Available credit is ${availableCredit.toFixed(2)}.`,
+        }, { status: 400 });
+      }
+
+      customerCreditTermsDays = Math.max(
+        1,
+        Number((customer as { default_credit_terms_days?: number | null }).default_credit_terms_days ?? 30)
+      );
     }
 
     // Generate unique invoice number
@@ -172,7 +284,7 @@ export async function POST(request: NextRequest) {
     if (itemsError) throw itemsError;
 
     // 3. Create payment records
-    const salePaymentsPayload = payments.map((p: { method: string; amount: number; referenceNo?: string }) => ({
+    const salePaymentsPayload = paymentInputs.map((p) => ({
       sale_id: sale.id,
       payment_method: p.method,
       amount: p.amount,
@@ -198,10 +310,10 @@ export async function POST(request: NextRequest) {
 
     // 5. Update shift totals
     if (shiftId) {
-      const cashAmount = (payments as { method: string; amount: number }[])
+      const cashAmount = paymentInputs
         .filter((p) => p.method === "cash")
         .reduce((sum, p) => sum + p.amount, 0);
-      const nonCashAmount = (payments as { method: string; amount: number }[])
+      const nonCashAmount = paymentInputs
         .filter((p) => p.method !== "cash")
         .reduce((sum, p) => sum + p.amount, 0);
 
@@ -222,24 +334,38 @@ export async function POST(request: NextRequest) {
     }
 
     // 6. If customer_credit payment and customer present, create a receivable
-    const creditPayment = (payments as { method: string; amount: number }[]).find(
-      (p) => p.method === "customer_credit"
-    );
-    if (creditPayment && customerId) {
+    if (creditAmount > 0 && customerId) {
       const recNow = new Date();
-      const recInvoice = `REC-${recNow.getTime()}`;
-      const dueDate = new Date(recNow.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const dueDate = new Date(
+        recNow.getTime() + customerCreditTermsDays * 24 * 60 * 60 * 1000
+      ).toISOString().slice(0, 10);
       await supabaseAdmin.from("receivables").insert({
-        invoice_number: recInvoice,
+        invoice_number: `${sale.invoice_number}-CR`,
         customer_id: customerId,
         sale_id: sale.id,
         branch_id: branchId,
-        total_amount: creditPayment.amount,
+        total_amount: creditAmount,
         paid_amount: 0,
         due_date: dueDate,
         status: "unpaid",
+        notes: notes || `Credit balance from POS sale ${sale.invoice_number}`,
       });
     }
+
+    const itemDiscountAmount = itemInputs.reduce(
+      (sum, item) => sum + parseNumber(item.discountAmount),
+      0,
+    );
+
+    await notifyUnusualDiscount({
+      saleId: sale.id,
+      branchId,
+      cashierId,
+      invoiceNumber: sale.invoice_number,
+      subtotal: parseNumber(subtotal),
+      orderDiscountAmount: parseNumber(discountAmount),
+      itemDiscountAmount,
+    });
 
     return NextResponse.json({ success: true, saleId: sale.id, invoiceNumber: sale.invoice_number });
   } catch (err: unknown) {

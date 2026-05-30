@@ -1,10 +1,6 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import AppShell from "@/components/AppShell";
 import "./globals.css";
-
-const geist     = Geist({ subsets: ["latin"], variable: "--font-geist" });
-const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -21,7 +17,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className={`${geist.variable} ${geistMono.variable}`}>
+      <body>
         <AppShell>{children}</AppShell>
       </body>
     </html>

@@ -23,7 +23,7 @@ export const DEFAULT_POLICY: PasswordPolicy = {
   lockout_duration_minutes: 15,
   session_timeout_minutes: 30,
   pin_length: 4,
-  require_2fa_for_admins: true,
+  require_2fa_for_admins: false,
 };
 
 export interface PasswordStrength {
@@ -101,6 +101,25 @@ export function detectDeviceName(): string {
   return `${browser} on ${os}`;
 }
 
+export function parseUserAgentDetails(userAgent: string) {
+  const browser =
+    /Edg\/[\d.]+/i.test(userAgent) ? "Edge" :
+    /Chrome\/[\d.]+/i.test(userAgent) ? "Chrome" :
+    /Firefox\/[\d.]+/i.test(userAgent) ? "Firefox" :
+    /Safari\/[\d.]+/i.test(userAgent) ? "Safari" :
+    "Browser";
+
+  const os =
+    /Windows/i.test(userAgent) ? "Windows" :
+    /Macintosh/i.test(userAgent) ? "macOS" :
+    /Android/i.test(userAgent) ? "Android" :
+    /iPhone|iPad/i.test(userAgent) ? "iOS" :
+    /Linux/i.test(userAgent) ? "Linux" :
+    "Unknown OS";
+
+  return { browser, os };
+}
+
 // ─── Inactivity timer ─────────────────────────────────────────────────────────
 
 type InactivityOptions = {
@@ -134,6 +153,10 @@ export class InactivityTimer {
     }
     this.timer = setTimeout(onLogout, timeoutMs);
   };
+
+  ping() {
+    this.reset();
+  }
 
   start() {
     this.EVENTS.forEach(e => window.addEventListener(e, this.reset, { passive: true }));

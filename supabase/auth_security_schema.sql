@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS totp_secrets (
 --   'lockout_duration_minutes'    → '15'
 --   'session_timeout_minutes'     → '30'
 --   'pin_length'                  → '4'
---   'require_2fa_for_admins'      → 'true'
+--   'require_2fa_for_admins'      → 'false'
 
 -- ============================================================
 -- 7. ACCOUNT LOCKOUT HELPER FUNCTION
@@ -519,7 +519,7 @@ INSERT INTO public.settings (branch_id, key, value) VALUES
   (NULL, 'lockout_duration_minutes',   '15'),
   (NULL, 'session_timeout_minutes',    '30'),
   (NULL, 'pin_length',                 '4'),
-  (NULL, 'require_2fa_for_admins',     'true')
+  (NULL, 'require_2fa_for_admins',     'false')
 ON CONFLICT (branch_id, key) DO NOTHING;
 
 -- ============================================================
@@ -573,4 +573,3 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.set_cashier_pin(UUID, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.clear_cashier_pin(UUID)    TO authenticated;
-

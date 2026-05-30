@@ -5,10 +5,12 @@ import { usePathname } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
 import { RbacProvider, useRbac } from "@/components/RbacProvider";
+import { SubscriptionProvider } from "@/components/SubscriptionProvider";
 import { PUBLIC_ROUTES } from "@/lib/rbac";
 import { useInactivityLogout } from "@/lib/use-inactivity-logout";
 import { supabase } from "@/lib/supabase";
-import { AlertTriangle, LogOut, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
+import { isPasswordExpired, normalizeSecurityPolicy } from "@/lib/security-policy";
 
 const routeMeta: Record<string, { title: string; subtitle?: string; searchPlaceholder?: string }> = {
   dashboard:    { title: "Dashboard",        searchPlaceholder: "Search dashboard..." },
@@ -16,11 +18,14 @@ const routeMeta: Record<string, { title: string; subtitle?: string; searchPlaceh
   inventory:    { title: "Inventory",        searchPlaceholder: "Search SKU, item name, or brand..." },
   catalog:      { title: "Catalog & Compatibility", subtitle: "Manage categories, brands, fitment data, and product grouping", searchPlaceholder: "Search categories, brands, models, or groups..." },
   purchasing:   { title: "Purchasing",       searchPlaceholder: "Search suppliers, PO numbers, or items..." },
+  "sales-orders": { title: "Quotes & Orders", subtitle: "Quotations, wholesale pricing, stock reservations, and conversion to sale", searchPlaceholder: "Search quote #, sales order #, customer, or email..." },
   receivables:  { title: "Receivables",      subtitle: "Manage customer credit invoices and collections", searchPlaceholder: "Search invoice #, customer, or amount..." },
   payables:     { title: "Payables",         subtitle: "Manage your supplier bills and payments", searchPlaceholder: "Search bill #, supplier, or amount..." },
   customers:    { title: "Customers",        searchPlaceholder: "Search customers, contact, or balance..." },
   suppliers:    { title: "Suppliers",        searchPlaceholder: "Search suppliers, parts, or terms..." },
   reports:      { title: "Reports",          searchPlaceholder: "Search report name or metric..." },
+  notifications:{ title: "Notifications",    subtitle: "Low stock, due payments, credit reminders, discounts, and alert delivery", searchPlaceholder: "Search alerts, branches, or modules..." },
+  subscription: { title: "Subscription",     subtitle: "Plans, limits, billing, renewals, invoices, and feature locks", searchPlaceholder: "Search plans, invoices, or features..." },
   "users-roles": { title: "Users & Roles",   searchPlaceholder: "Search users or permissions..." },
   settings:     { title: "Settings",         searchPlaceholder: "Search settings..." },
   security:     { title: "Security Center",  subtitle: "Login history, sessions, 2FA and password management", searchPlaceholder: "Search security settings..." },
@@ -68,7 +73,7 @@ function InactivityWarning({ onDismiss }: { onDismiss: () => void }) {
           Session expiring soon
         </p>
         <p style={{ color: "#94a3b8", fontSize: 12, margin: "4px 0 12px" }}>
-          You'll be signed out in <strong style={{ color: "#f59e0b" }}>{timeStr}</strong> due to inactivity.
+          You&apos;ll be signed out in <strong style={{ color: "#f59e0b" }}>{timeStr}</strong> due to inactivity.
         </p>
         <button
           id="btn-stay-signed-in"
@@ -103,8 +108,9 @@ function InactivityWarning({ onDismiss }: { onDismiss: () => void }) {
 
 function ShellInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { loading, user } = useRbac();
+  const { user, role } = useRbac();
   const [sessionTimeoutMin, setSessionTimeoutMin] = useState(30);
+  const [requireAdmin2fa, setRequireAdmin2fa] = useState(true);
   const [showWarning, setShowWarning] = useState(false);
 
   const isAuthScreen = PUBLIC_ROUTES.includes(pathname);
@@ -121,8 +127,22 @@ function ShellInner({ children }: { children: React.ReactNode }) {
       .is("branch_id", null)
       .maybeSingle()
       .then(({ data }) => {
-        const mins = parseInt((data as { value?: string } | null)?.value ?? "30");
-        if (!isNaN(mins) && mins > 0) setSessionTimeoutMin(mins);
+        const policy = normalizeSecurityPolicy({ session_timeout_minutes: (data as { value?: string } | null)?.value });
+        if (policy.session_timeout_minutes > 0) setSessionTimeoutMin(policy.session_timeout_minutes);
+      });
+  }, [user, isAuthScreen]);
+
+  useEffect(() => {
+    if (isAuthScreen || !user) return;
+    supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "require_2fa_for_admins")
+      .is("branch_id", null)
+      .maybeSingle()
+      .then(({ data }) => {
+        const value = ((data as { value?: string } | null)?.value ?? "false").toLowerCase();
+        setRequireAdmin2fa(value !== "false");
       });
   }, [user, isAuthScreen]);
 
@@ -130,20 +150,65 @@ function ShellInner({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (isAuthScreen || !user) return;
     const id = setInterval(async () => {
-      try { await supabase.rpc("update_last_active", { p_user_id: user.id }); } catch { /* noop */ }
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const tokenPrefix = session?.access_token?.slice(0, 32) ?? null;
+
+        if (tokenPrefix) {
+          const { data: trackedSession } = await supabase
+            .from("device_sessions")
+            .select("id")
+            .eq("session_token", tokenPrefix)
+            .maybeSingle();
+
+          if (!trackedSession) {
+            await supabase.auth.signOut();
+            window.location.replace("/?reason=inactivity");
+            return;
+          }
+
+          await supabase
+            .from("device_sessions")
+            .update({ last_active_at: new Date().toISOString(), is_current: true })
+            .eq("id", trackedSession.id);
+        }
+
+        await supabase.rpc("update_last_active", { p_user_id: user.id });
+      } catch {
+        /* noop */
+      }
     }, 5 * 60 * 1000);
     return () => clearInterval(id);
   }, [user, isAuthScreen]);
 
   const handleWarning = useCallback(() => setShowWarning(true), []);
-  const handleDismiss = useCallback(() => setShowWarning(false), []);
 
   // Inactivity logout hook — only when authenticated
-  useInactivityLogout({
+  const { restartTimer } = useInactivityLogout({
     timeoutMinutes: isAuthScreen ? 0 : sessionTimeoutMin,
     warningMinutes: 2,
     onWarning: handleWarning,
   });
+
+  const handleDismiss = useCallback(() => {
+    setShowWarning(false);
+    restartTimer();
+  }, [restartTimer]);
+
+  useEffect(() => {
+    if (isAuthScreen || !user) return;
+    const isPrivilegedRole = role?.name === "super_admin" || role?.name === "admin";
+    const mustSetup2fa = requireAdmin2fa && isPrivilegedRole && !user.two_factor_enabled;
+    if (mustSetup2fa && pathname !== "/security") {
+      window.location.replace("/security?setup2fa=required");
+      return;
+    }
+
+    if (pathname !== "/security" && (user.require_password_change || isPasswordExpired(user.password_expires_at))) {
+      const reason = user.require_password_change ? "password_update_required" : "password_expired";
+      window.location.replace(`/security?tab=password&reason=${reason}`);
+    }
+  }, [isAuthScreen, pathname, requireAdmin2fa, role?.name, user]);
 
   if (isAuthScreen) return <>{children}</>;
 
@@ -185,7 +250,9 @@ function ShellInner({ children }: { children: React.ReactNode }) {
 export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <RbacProvider>
-      <ShellInner>{children}</ShellInner>
+      <SubscriptionProvider>
+        <ShellInner>{children}</ShellInner>
+      </SubscriptionProvider>
     </RbacProvider>
   );
 }

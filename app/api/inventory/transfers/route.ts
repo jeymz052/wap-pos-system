@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { applyInventoryMovement } from "@/lib/inventory-admin";
 import { getAuthenticatedUser, hasAnyPermission } from "@/lib/server-auth";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { requireSubscriptionFeature } from "@/lib/subscriptions";
 
 type TransferBody = {
   productId?: string;
@@ -20,6 +21,10 @@ export async function POST(request: NextRequest) {
 
     if (!hasAnyPermission(user, "inventory:transfer_stock", "inventory:manage")) {
       return NextResponse.json({ error: "You do not have permission to transfer stock." }, { status: 403 });
+    }
+
+    if (!(await requireSubscriptionFeature("multi_branch_transfers"))) {
+      return NextResponse.json({ error: "Multi-branch transfers are not enabled on the current subscription plan." }, { status: 403 });
     }
 
     const body = (await request.json()) as TransferBody;

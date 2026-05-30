@@ -7,6 +7,7 @@ import {
   type BarcodeSourceType,
 } from "@/lib/barcode-utils";
 import { getAuthenticatedUser, hasAnyPermission } from "@/lib/server-auth";
+import { requireSubscriptionFeature } from "@/lib/subscriptions";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -154,6 +155,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "You do not have permission to view barcode mappings." }, { status: 403 });
     }
 
+    if (!(await requireSubscriptionFeature("barcode_printing"))) {
+      return NextResponse.json({ error: "Barcode printing is not enabled on the current subscription plan." }, { status: 403 });
+    }
+
     const { searchParams } = new URL(request.url);
     const productId = searchParams.get("productId");
     const productIdsParam = searchParams.get("productIds");
@@ -233,6 +238,10 @@ export async function POST(request: NextRequest) {
 
     if (!hasAnyPermission(authenticatedUser, "inventory:edit", "inventory:manage", "inventory:print_barcode")) {
       return NextResponse.json({ error: "You do not have permission to update barcode mappings." }, { status: 403 });
+    }
+
+    if (!(await requireSubscriptionFeature("barcode_printing"))) {
+      return NextResponse.json({ error: "Barcode printing is not enabled on the current subscription plan." }, { status: 403 });
     }
 
     const body = await request.json();

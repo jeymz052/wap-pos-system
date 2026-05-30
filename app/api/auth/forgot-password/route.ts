@@ -1,11 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
 const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  supabaseUrl,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
+
+const supabasePublic = createClient(supabaseUrl, anonKey, {
+  auth: { autoRefreshToken: false, persistSession: false },
+});
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,17 +32,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    // Use Supabase admin to send password reset email
-    const { error: resetError } = await supabaseAdmin.auth.admin.generateLink({
-      type: "recovery",
-      email: resolvedEmail as string,
-      options: {
-        redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"}/reset-password`,
-      },
+    // Let Supabase Auth send the recovery email through the project's configured SMTP provider.
+    const { error: resetError } = await supabasePublic.auth.resetPasswordForEmail(resolvedEmail as string, {
+      redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"}/reset-password`,
     });
 
     if (resetError) {
-      console.error("[forgot-password] generateLink error:", resetError.message);
+      console.error("[forgot-password] resetPasswordForEmail error:", resetError.message);
       // Still return OK to avoid enumeration
     }
 

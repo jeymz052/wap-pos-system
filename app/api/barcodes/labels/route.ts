@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { type BarcodeKind } from "@/lib/barcode-utils";
 import { getAuthenticatedUser, hasAnyPermission } from "@/lib/server-auth";
+import { requireSubscriptionFeature } from "@/lib/subscriptions";
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -33,6 +34,10 @@ export async function POST(request: NextRequest) {
 
     if (!hasAnyPermission(authenticatedUser, "inventory:print_barcode", "inventory:manage")) {
       return NextResponse.json({ error: "You do not have permission to record barcode label prints." }, { status: 403 });
+    }
+
+    if (!(await requireSubscriptionFeature("barcode_printing"))) {
+      return NextResponse.json({ error: "Barcode printing is not enabled on the current subscription plan." }, { status: 403 });
     }
 
     const body = await request.json();

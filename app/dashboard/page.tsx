@@ -5,7 +5,6 @@ import {
   AlertTriangle, ArrowDown, ArrowUp, BarChart2, Box, Building2,
   CreditCard, DollarSign, LayoutDashboard, Package, ShoppingBag,
   ShoppingCart, Smartphone, TrendingUp, Truck, Users, Wallet,
-  RefreshCw, ChevronRight,
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer,
@@ -20,8 +19,6 @@ type Branch = { id: string; name: string; is_main?: boolean };
 const PHP = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP", minimumFractionDigits: 2 });
 const NUM = new Intl.NumberFormat("en-PH");
 const fc  = (v: number) => PHP.format(v).replace("PHP", "₱");
-const pct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
-
 const BRAND_COLORS = ["#2563eb","#7c3aed","#0891b2","#16a34a","#dc2626","#d97706"];
 
 function KpiCard({ label, value, sub, icon: Icon, color, trend }: {
@@ -65,10 +62,8 @@ function EmptyState({ msg }: { msg: string }) {
 export default function DashboardPage() {
   const isMounted = useSyncExternalStore(() => () => {}, () => true, () => false);
 
-  const [branches, setBranches]     = useState<Branch[]>([]);
   const [branchId,  setBranchId]    = useState("");
   const [userName,  setUserName]    = useState("User");
-  const [refreshKey, setRefreshKey] = useState(0);
 
   // Load branches + user
   useEffect(() => {
@@ -85,7 +80,6 @@ export default function DashboardPage() {
 
       const prof = profRes.data as Record<string,unknown> | null;
       const brs  = (brRes.data ?? []) as Branch[];
-      setBranches(brs);
 
       const saved   = typeof localStorage !== "undefined" ? localStorage.getItem("active_branch_id") : null;
       const defBr   = brs.find(b => b.id === saved) ?? brs.find(b => b.is_main) ?? brs[0];
@@ -97,12 +91,16 @@ export default function DashboardPage() {
         roleName = (rr.data as {name?:string}|null)?.name ?? null;
       }
       const resolved = resolveCurrentUserInfo({ authUser: user, profileUser: prof as never, roleName });
-      if (alive) setUserName(resolved.displayName || resolved.username);
+      const profileFullName = [prof?.first_name, prof?.last_name]
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .join(" ")
+        .trim();
+      if (alive) setUserName(profileFullName || resolved.displayName || resolved.username);
     }
     void init();
     return () => { alive = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey]);
+  }, []);
 
   // Listen for branch changes from TopBar
   useEffect(() => {
@@ -115,8 +113,6 @@ export default function DashboardPage() {
   }, []);
 
   const data = useDashboardData(branchId);
-
-  const activeBranch = branches.find(b => b.id === branchId)?.name ?? "All Branches";
 
   // Payment breakdown total
   const pb = data.paymentBreakdown;
@@ -136,22 +132,11 @@ export default function DashboardPage() {
       <div className="db2-header">
         <div className="db2-header__left">
           <LayoutDashboard size={18} className="db2-header__icon" />
-          <div>
+          <div className="db2-header__copy">
+            <span className="db2-header__eyebrow">Overview Workspace</span>
             <h1 className="db2-header__title">Dashboard Overview</h1>
-            <p className="db2-header__sub">Welcome back, {userName}! · {activeBranch}</p>
+            <p className="db2-header__sub">Welcome back, {userName}. Here&apos;s what&apos;s happening today.</p>
           </div>
-        </div>
-        <div className="db2-header__right">
-          <select
-            className="db2-branch-sel"
-            value={branchId}
-            onChange={e => { setBranchId(e.target.value); localStorage.setItem("active_branch_id", e.target.value); }}
-          >
-            {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
-          <button className="db2-refresh" onClick={() => setRefreshKey(k => k + 1)} title="Refresh">
-            <RefreshCw size={14} className={!data.loaded ? "db2-spin" : ""} />
-          </button>
         </div>
       </div>
 
@@ -171,30 +156,38 @@ export default function DashboardPage() {
 
       {/* ── Financial summary row ──────────────────────────────────── */}
       <div className="db2-fin-row">
-        <div className="db2-fin-card db2-fin-card--blue">
-          <div className="db2-fin-card__label">Net Sales (Today)</div>
-          <div className="db2-fin-card__value">{fc(data.todaySales)}</div>
-          <div className="db2-fin-card__meta">{NUM.format(data.todayTransactions)} transactions</div>
-        </div>
-        <div className="db2-fin-card db2-fin-card--green">
-          <div className="db2-fin-card__label">Gross Profit (MTD)</div>
-          <div className="db2-fin-card__value">{fc(data.grossProfit)}</div>
-          <div className="db2-fin-card__meta">{NUM.format(data.totalTransactions)} transactions</div>
-        </div>
-        <div className="db2-fin-card db2-fin-card--purple">
-          <div className="db2-fin-card__label">Customer Credit Balance</div>
-          <div className="db2-fin-card__value">{fc(data.customerCreditBalance)}</div>
-          <div className="db2-fin-card__meta">Open receivables</div>
-        </div>
-        <div className="db2-fin-card db2-fin-card--orange">
-          <div className="db2-fin-card__label">Supplier Payable</div>
-          <div className="db2-fin-card__value">{fc(data.supplierPayableBalance)}</div>
-          <div className="db2-fin-card__meta">Outstanding payables</div>
-        </div>
+        <KpiCard
+          label="Net Sales (Today)"
+          value={fc(data.netSales)}
+          sub="After discounts and refunds"
+          icon={ShoppingBag}
+          color="#2563eb"
+        />
+        <KpiCard
+          label="Gross Profit (MTD)"
+          value={fc(data.grossProfit)}
+          sub={`${NUM.format(data.totalTransactions)} month-to-date transactions`}
+          icon={BarChart2}
+          color="#16a34a"
+        />
+        <KpiCard
+          label="Customer Credit Balance"
+          value={fc(data.customerCreditBalance)}
+          sub="Open receivables"
+          icon={Users}
+          color="#7c3aed"
+        />
+        <KpiCard
+          label="Supplier Payable"
+          value={fc(data.supplierPayableBalance)}
+          sub="Outstanding payables"
+          icon={Truck}
+          color="#d97706"
+        />
       </div>
 
       {/* ── Payment Breakdown ──────────────────────────────────────── */}
-      <Panel title="Today's Payment Breakdown">
+      <Panel title="Today's Payment Breakdown" action={<span>{fc(payTotal)} collected</span>}>
         <div className="db2-pay-grid">
           {payBreakdownItems.map(item => (
             <div key={item.label} className="db2-pay-item">
@@ -214,7 +207,7 @@ export default function DashboardPage() {
 
       {/* ── Charts ─────────────────────────────────────────────────── */}
       <div className="db2-chart-row">
-        <Panel title="Daily Sales (Last 14 Days)">
+        <Panel title="Daily Sales (Last 14 Days)" action={<span>Sales vs profit</span>}>
           <div className="db2-chart-wrap">
             {isMounted ? (
               <ResponsiveContainer width="100%" height="100%">
@@ -241,7 +234,7 @@ export default function DashboardPage() {
           </div>
         </Panel>
 
-        <Panel title="Monthly Revenue (Last 6 Months)">
+        <Panel title="Monthly Revenue (Last 6 Months)" action={<span>Trend view</span>}>
           <div className="db2-chart-wrap">
             {isMounted ? (
               <ResponsiveContainer width="100%" height="100%">
@@ -327,13 +320,15 @@ export default function DashboardPage() {
         <Panel title="Staff Performance (MTD)" action={<span className="db2-see-all">This Month</span>}>
           {data.staffStats.length === 0 ? <EmptyState msg="No staff sales recorded this month." /> : (
             <table className="db2-table">
-              <thead><tr><th>Staff</th><th className="db2-ta-r">Transactions</th><th className="db2-ta-r">Sales</th></tr></thead>
+              <thead><tr><th>Staff</th><th className="db2-ta-r">Transactions</th><th className="db2-ta-r">Net Sales</th><th className="db2-ta-r">Profit</th><th className="db2-ta-r">Avg Ticket</th></tr></thead>
               <tbody>
                 {data.staffStats.map((s, i) => (
                   <tr key={s.name + i}>
                     <td><div className="db2-name-cell"><span className="db2-avatar" style={{ background: `${BRAND_COLORS[i % BRAND_COLORS.length]}22`, color: BRAND_COLORS[i % BRAND_COLORS.length] }}>{s.initials}</span>{s.name}</div></td>
                     <td className="db2-ta-r db2-table__num">{NUM.format(s.transactions)}</td>
-                    <td className="db2-ta-r db2-table__amt">{fc(s.sales)}</td>
+                    <td className="db2-ta-r db2-table__amt">{fc(s.netSales)}</td>
+                    <td className="db2-ta-r db2-table__amt">{fc(s.profit)}</td>
+                    <td className="db2-ta-r db2-table__amt">{fc(s.avgTicket)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -341,19 +336,22 @@ export default function DashboardPage() {
           )}
         </Panel>
 
-        <Panel title="Branch Comparison (MTD)">
+        <Panel title="Branch Comparison (MTD)" action={<span>All branches</span>}>
           {data.branchStats.length === 0 ? <EmptyState msg="No branch data available." /> : (
             <div className="db2-branch-list">
               {data.branchStats.map((b, i) => {
-                const maxSales = Math.max(...data.branchStats.map(x => x.sales), 1);
+                const maxSales = Math.max(...data.branchStats.map(x => x.netSales), 1);
                 return (
                   <div key={b.name} className="db2-branch-item">
                     <div className="db2-branch-item__top">
                       <span className="db2-branch-item__name"><Building2 size={12} /> {b.name}</span>
-                      <span className="db2-branch-item__val">{fc(b.sales)}</span>
+                      <span className="db2-branch-item__val">{fc(b.netSales)}</span>
                     </div>
                     <div className="db2-bar-track">
-                      <div className="db2-bar-fill" style={{ width: `${(b.sales / maxSales) * 100}%`, background: BRAND_COLORS[i % BRAND_COLORS.length] }} />
+                      <div className="db2-bar-fill" style={{ width: `${(b.netSales / maxSales) * 100}%`, background: BRAND_COLORS[i % BRAND_COLORS.length] }} />
+                    </div>
+                    <div className="db2-kpi__sub">
+                      {NUM.format(b.transactions)} txns · Profit {fc(b.profit)}
                     </div>
                   </div>
                 );
@@ -365,15 +363,15 @@ export default function DashboardPage() {
 
       {/* ── Pending POs ────────────────────────────────────────────── */}
       <div className="db2-summary-row">
-        <Panel title="Quick Financials">
+        <Panel title="Quick Financials" action={<span>Live snapshot</span>}>
           <div className="db2-quick-grid">
             {[
-              { label: "Total Sales Today",     value: fc(data.todaySales),            icon: TrendingUp,   color: "#2563eb" },
-              { label: "Total Transactions",    value: NUM.format(data.todayTransactions), icon: ShoppingBag, color: "#7c3aed" },
-              { label: "Cash Sales (Today)",    value: fc(pb.cash),                    icon: Wallet,        color: "#16a34a" },
-              { label: "GCash/Card Sales",      value: fc(pb.gcash + pb.card),         icon: CreditCard,    color: "#0891b2" },
-              { label: "Pending PO Value",      value: NUM.format(data.pendingPOCount) + " orders", icon: Truck, color: "#d97706" },
-              { label: "Monthly Revenue",       value: fc(data.monthlySales.slice(-1)[0]?.revenue ?? 0), icon: BarChart2, color: "#dc2626" },
+              { label: "Total Transactions", value: NUM.format(data.todayTransactions), icon: ShoppingBag, color: "#7c3aed" },
+              { label: "Cash Sales (Today)", value: fc(pb.cash), icon: Wallet, color: "#16a34a" },
+              { label: "GCash Sales", value: fc(pb.gcash), icon: Smartphone, color: "#7c3aed" },
+              { label: "Card Sales", value: fc(pb.card), icon: CreditCard, color: "#2563eb" },
+              { label: "Bank Sales", value: fc(pb.bank), icon: Building2, color: "#0891b2" },
+              { label: "Pending PO Value", value: fc(data.pendingPOValue), icon: Truck, color: "#d97706" },
             ].map(item => (
               <div key={item.label} className="db2-quick-card">
                 <div className="db2-quick-card__icon" style={{ background: `${item.color}15`, color: item.color }}>

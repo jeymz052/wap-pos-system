@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useRef } from "react";
-import { Mail, MessageSquare, Printer, X, CheckCircle2 } from "lucide-react";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
+import { Download, Mail, MessageSquare, Printer, X, CheckCircle2 } from "lucide-react";
 import type { PaymentLine } from "./PaymentModal";
 
 type CartRow = { name: string; sku: string; quantity: number; unitPrice: number; discountAmount: number; totalPrice: number };
@@ -13,6 +15,11 @@ type Props = {
   customerName: string;
   customerEmail?: string | null;
   customerPhone?: string | null;
+  issuedAt?: string;
+  shopName?: string;
+  shopAddress?: string;
+  shopPhone?: string;
+  shopTaxId?: string;
   items: CartRow[];
   subtotal: number;
   discountAmount: number;
@@ -49,6 +56,11 @@ export default function ReceiptModal(props: Props) {
     customerName,
     customerEmail,
     customerPhone,
+    issuedAt,
+    shopName,
+    shopAddress,
+    shopPhone,
+    shopTaxId,
     items,
     subtotal,
     discountAmount,
@@ -94,7 +106,10 @@ export default function ReceiptModal(props: Props) {
 
   function buildReceiptSummary() {
     return [
-      receiptHeader || branchName,
+      shopName || receiptHeader || branchName,
+      shopAddress ? `Address: ${shopAddress}` : "",
+      shopPhone ? `Contact: ${shopPhone}` : "",
+      shopTaxId ? `TIN/VAT No.: ${shopTaxId}` : "",
       `Receipt: ${invoiceNumber}`,
       `Customer: ${customerName}`,
       `Cashier: ${cashierName}`,
@@ -103,6 +118,103 @@ export default function ReceiptModal(props: Props) {
       `Payments: ${payments.map((payment) => `${METHOD_LABELS[payment.method] ?? payment.method} ${fmt(payment.amount)}`).join(", ")}`,
       receiptFooter || "Thank you for your purchase!",
     ].join("\n");
+  }
+
+  function handleSavePdf() {
+    const doc = new jsPDF({
+      unit: "mm",
+      format: [80, 180],
+    });
+
+    const receiptDate = new Date(issuedAt ?? new Date().toISOString());
+    const dateLabel = new Intl.DateTimeFormat("en-PH", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(receiptDate);
+
+    let cursorY = 8;
+    doc.setFont("courier", "bold");
+    doc.setFontSize(11);
+    doc.text("WAP POS", 40, cursorY, { align: "center" });
+    cursorY += 5;
+    doc.setFontSize(8.5);
+    doc.text("Motorparts POS & Inventory", 40, cursorY, { align: "center" });
+    cursorY += 5;
+    doc.setFont("courier", "normal");
+    doc.text(`Shop Name: ${shopName || receiptHeader || branchName}`, 6, cursorY);
+    cursorY += 4;
+    if (shopAddress) {
+      doc.text(`Address: ${shopAddress}`, 6, cursorY, { maxWidth: 68 });
+      cursorY += 8;
+    }
+    if (shopPhone) {
+      doc.text(`Contact: ${shopPhone}`, 6, cursorY);
+      cursorY += 4;
+    }
+    doc.text(`TIN/VAT No.: ${shopTaxId || "-"}`, 6, cursorY);
+    cursorY += 4;
+    doc.text("------------------------------------------------", 6, cursorY);
+    cursorY += 4;
+    doc.text(`Receipt No.: ${invoiceNumber}`, 6, cursorY);
+    cursorY += 4;
+    doc.text(`Date: ${dateLabel}`, 6, cursorY);
+    cursorY += 4;
+    doc.text(`Cashier: ${cashierName}`, 6, cursorY);
+    cursorY += 4;
+    doc.text(`Branch: ${branchName}`, 6, cursorY);
+    cursorY += 4;
+    doc.text("------------------------------------------------", 6, cursorY);
+    cursorY += 2;
+
+    autoTable(doc, {
+      startY: cursorY,
+      theme: "plain",
+      margin: { left: 6, right: 6 },
+      styles: { font: "courier", fontSize: 7, cellPadding: 0.6 },
+      headStyles: { fontStyle: "bold" },
+      head: [["Item", "Qty", "Price", "Total"]],
+      body: items.map((item) => [
+        item.name,
+        String(item.quantity),
+        fmt(item.unitPrice),
+        fmt(item.totalPrice),
+      ]),
+    });
+
+    cursorY = (doc as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? cursorY + 8;
+    cursorY += 2;
+    doc.text("------------------------------------------------", 6, cursorY);
+    cursorY += 4;
+    doc.text(`Subtotal: ${fmt(subtotal)}`, 6, cursorY);
+    cursorY += 4;
+    doc.text(`Discount: ${fmt(discountAmount)}`, 6, cursorY);
+    cursorY += 4;
+    doc.text(`VAT/Tax: ${fmt(taxAmount)}`, 6, cursorY);
+    cursorY += 4;
+    doc.setFont("courier", "bold");
+    doc.text(`TOTAL: ${fmt(total)}`, 6, cursorY);
+    cursorY += 4;
+    doc.setFont("courier", "normal");
+    for (const payment of payments) {
+      doc.text(`${METHOD_LABELS[payment.method] ?? payment.method}: ${fmt(payment.amount)}`, 6, cursorY);
+      cursorY += 4;
+    }
+    if (payments.some((payment) => payment.method === "cash")) {
+      doc.text(`Change: ${fmt(changeAmount)}`, 6, cursorY);
+      cursorY += 4;
+    }
+    doc.text("------------------------------------------------", 6, cursorY);
+    cursorY += 4;
+    doc.text(receiptFooter || "Thank you for your purchase!", 40, cursorY, { align: "center", maxWidth: 68 });
+    cursorY += 5;
+    doc.text("No return without receipt.", 40, cursorY, { align: "center" });
+    cursorY += 4;
+    doc.text("Powered by WAP POS", 40, cursorY, { align: "center" });
+
+    doc.save(`${invoiceNumber}.pdf`);
   }
 
   function handleEmailReceipt() {
@@ -118,7 +230,7 @@ export default function ReceiptModal(props: Props) {
     window.location.href = `sms:${customerPhone}?body=${body}`;
   }
 
-  const now = new Date();
+  const now = new Date(issuedAt ?? new Date().toISOString());
   const dateStr = now.toLocaleDateString("en-PH", { month: "short", day: "2-digit", year: "numeric" });
   const timeStr = now.toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" });
 
@@ -136,15 +248,26 @@ export default function ReceiptModal(props: Props) {
         <div className="pos-receipt-scroll">
           <div ref={receiptRef} className="pos-receipt">
             <div className="pos-receipt__header">
-              <div className="pos-receipt__store">{receiptHeader || branchName}</div>
-              <div className="pos-receipt__tagline">Official Sales Receipt</div>
+              <div className="pos-receipt__store">WAP POS</div>
+              <div className="pos-receipt__tagline">Motorparts POS & Inventory</div>
+              <div className="pos-receipt__meta">
+                <span>Shop Name: {shopName || receiptHeader || branchName}</span>
+              </div>
+              {shopAddress ? <div className="pos-receipt__meta"><span>Address: {shopAddress}</span></div> : null}
+              {shopPhone ? <div className="pos-receipt__meta"><span>Contact: {shopPhone}</span></div> : null}
+              <div className="pos-receipt__meta">
+                <span>TIN/VAT No.: {shopTaxId || "-"}</span>
+              </div>
               <div className="pos-receipt__divider" />
               <div className="pos-receipt__meta">
-                <span>{invoiceNumber}</span>
+                <span>Receipt No.: {invoiceNumber}</span>
                 <span>{dateStr} {timeStr}</span>
               </div>
               <div className="pos-receipt__meta">
                 <span>Cashier: {cashierName}</span>
+                <span>Branch: {branchName}</span>
+              </div>
+              <div className="pos-receipt__meta">
                 <span>Customer: {customerName}</span>
               </div>
             </div>
@@ -194,7 +317,8 @@ export default function ReceiptModal(props: Props) {
             <div className="pos-receipt__divider" />
             <div className="pos-receipt__footer">
               <p>{receiptFooter || "Thank you for your purchase!"}</p>
-              <p>Warranty / returns subject to store policy.</p>
+              <p>No return without receipt.</p>
+              <p>Powered by WAP POS</p>
             </div>
           </div>
         </div>
@@ -208,6 +332,9 @@ export default function ReceiptModal(props: Props) {
           </button>
           <button type="button" className="pos-btn-ghost" onClick={handleSmsReceipt} disabled={!customerPhone}>
             <MessageSquare size={15} /> SMS Receipt
+          </button>
+          <button type="button" className="pos-btn-ghost" onClick={handleSavePdf}>
+            <Download size={15} /> Save as PDF
           </button>
           <button type="button" className="pos-btn-primary" onClick={onClose}>
             <CheckCircle2 size={15} /> Done - New Sale

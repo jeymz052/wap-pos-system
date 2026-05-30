@@ -18,6 +18,8 @@ import {
   Wallet,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
+import FeatureLockedPanel from "@/components/subscription/FeatureLockedPanel";
 
 type BranchRow = {
   id: string;
@@ -238,13 +240,6 @@ function buildInvoiceStatus(receivable: ReceivableRow) {
   return { baseStatus: "unpaid" as TabKey, statusLabel: "Unpaid", statusTone: "red" as const };
 }
 
-function buildUpdatedStatus(receivable: ReceivableRow, nextPaidAmount: number) {
-  const totalAmount = parseNumber(receivable.total_amount);
-  if (nextPaidAmount >= totalAmount) return "paid" as ReceivableStatus;
-  if (getDaysOverdue(receivable.due_date) > 0) return "overdue" as ReceivableStatus;
-  return "partial" as ReceivableStatus;
-}
-
 function buildDonutGradient(amounts: Record<AgingKey, number>) {
   const total = Object.values(amounts).reduce((sum, value) => sum + value, 0);
   if (total <= 0) {
@@ -270,10 +265,21 @@ function buildDonutGradient(amounts: Record<AgingKey, number>) {
   return `conic-gradient(${segments.join(", ")})`;
 }
 
+async function getAuthHeaders() {
+  const { data } = await supabase.auth.getSession();
+  const accessToken = data.session?.access_token;
+  return accessToken
+    ? {
+        Authorization: `Bearer ${accessToken}`,
+      }
+    : ({} as Record<string, string>);
+}
+
 export default function ReceivablesPage() {
+  const { loading: subscriptionLoading, hasFeature: hasSubscriptionFeature, requiredPlanFor } = useSubscriptionAccess();
+  const canUseCustomerCredit = hasSubscriptionFeature("customer_credit");
   const monthRange = getMonthRange(new Date());
   const [selectedBranchId, setSelectedBranchId] = useState("");
-  const [currentUserProfileId, setCurrentUserProfileId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [savingPayment, setSavingPayment] = useState(false);
@@ -341,7 +347,6 @@ export default function ReceivablesPage() {
         branchRows.find((branch) => branch.is_main) ??
         branchRows[0];
 
-      setCurrentUserProfileId(profile?.id ?? null);
       setSelectedBranchId(defaultBranch?.id ?? "");
       setLoading(false);
     };
@@ -697,9 +702,6 @@ export default function ReceivablesPage() {
 
     const amount = parseNumber(paymentForm.amount);
     const currentBalance = parseNumber(selectedReceivable.balance);
-    const currentPaid = parseNumber(selectedReceivable.paid_amount);
-    const totalAmount = parseNumber(selectedReceivable.total_amount);
-
     if (amount <= 0) {
       setError("Enter a payment amount greater than zero.");
       return;
@@ -712,53 +714,32 @@ export default function ReceivablesPage() {
 
     setSavingPayment(true);
 
-    const insertPaymentResult = await supabase.from("receivable_payments").insert({
-      receivable_id: selectedReceivable.id,
-      amount,
-      payment_method: paymentForm.paymentMethod,
-      reference_no: paymentForm.referenceNo.trim() || null,
-      received_by: currentUserProfileId,
+    const authHeaders = await getAuthHeaders();
+    const response = await fetch("/api/receivables/receive-payment", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+      },
+      body: JSON.stringify({
+        receivableId: selectedReceivable.id,
+        amount,
+        paymentMethod: paymentForm.paymentMethod,
+        referenceNo: paymentForm.referenceNo.trim() || null,
+      }),
     });
 
-    if (insertPaymentResult.error) {
+    const payload = await response.json();
+    if (!response.ok) {
       setSavingPayment(false);
-      setError(insertPaymentResult.error.message);
+      setError(payload.error || "Unable to record payment.");
       return;
-    }
-
-    const nextPaidAmount = Math.min(totalAmount, currentPaid + amount);
-    const nextStatus = buildUpdatedStatus(selectedReceivable, nextPaidAmount);
-
-    const updateReceivableResult = await supabase
-      .from("receivables")
-      .update({
-        paid_amount: nextPaidAmount,
-        status: nextStatus,
-      })
-      .eq("id", selectedReceivable.id);
-
-    if (updateReceivableResult.error) {
-      setSavingPayment(false);
-      setError(updateReceivableResult.error.message);
-      return;
-    }
-
-    const currentOutstanding = customerOutstandingMap.get(selectedReceivable.customer_id) ?? 0;
-    const nextCustomerBalance = Math.max(0, currentOutstanding - amount);
-
-    const updateCustomerResult = await supabase
-      .from("customers")
-      .update({ current_balance: nextCustomerBalance })
-      .eq("id", selectedReceivable.customer_id);
-
-    if (updateCustomerResult.error) {
-      console.error("[Receivables] Failed to update customer balance:", updateCustomerResult.error.message);
     }
 
     await refreshReceivables();
 
     setSavingPayment(false);
-    setNotice(`Payment recorded for ${selectedReceivable.invoice_number}.`);
+    setNotice(payload.message || `Payment recorded for ${selectedReceivable.invoice_number}.`);
     setPaymentForm({
       customerId: "",
       receivableId: "",
@@ -767,6 +748,16 @@ export default function ReceivablesPage() {
       amount: "",
     });
   };
+
+  if (!subscriptionLoading && !canUseCustomerCredit) {
+    return (
+      <FeatureLockedPanel
+        featureName="Customer Credit"
+        requiredPlan={requiredPlanFor("customer_credit")}
+        description="Receivables, customer credit invoices, and collection workflows are locked on the current plan."
+      />
+    );
+  }
 
   return (
     <div className="receivables-page">

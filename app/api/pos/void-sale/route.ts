@@ -1,34 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { applyInventoryMovement } from "@/lib/inventory-admin";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getAccessProfileByProfileId } from "@/lib/user-access";
 
 async function getUserPermissions(userId: string) {
-  const { data: userRow, error: userError } = await supabaseAdmin
-    .from("users")
-    .select("role_id")
-    .eq("id", userId)
-    .maybeSingle();
-
-  if (userError) throw userError;
-  const roleId = (userRow as { role_id?: string | null } | null)?.role_id;
-  if (!roleId) return new Set<string>();
-
-  const { data: permissionRows, error: permissionError } = await supabaseAdmin
-    .from("role_permissions")
-    .select("is_allowed, permissions(module, action)")
-    .eq("role_id", roleId)
-    .eq("is_allowed", true);
-
-  if (permissionError) throw permissionError;
-
-  const permissions = new Set<string>();
-  (permissionRows as Array<{ permissions?: { module?: string | null; action?: string | null } | null }> | null ?? []).forEach((row) => {
-    const moduleName = row.permissions?.module;
-    const action = row.permissions?.action;
-    if (moduleName && action) permissions.add(`${moduleName}:${action}`);
-  });
-
-  return permissions;
+  const accessProfile = await getAccessProfileByProfileId(userId);
+  return {
+    permissions: accessProfile?.permissions ?? new Set<string>(),
+    restrictions: accessProfile?.salesRestrictions ?? null,
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -40,17 +20,21 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Missing required fields." }, { status: 400 });
     }
 
-    const cashierPermissions = await getUserPermissions(cashierId);
-    const cashierCanVoid = cashierPermissions.has("pos:void") || cashierPermissions.has("pos:manage");
+    const cashierAccess = await getUserPermissions(cashierId);
+    const cashierCanVoid = cashierAccess.permissions.has("pos:void") || cashierAccess.permissions.has("pos:manage");
     if (!cashierCanVoid) {
       if (!approverUserId) {
         return NextResponse.json({ error: "Supervisor approval is required to void this sale." }, { status: 403 });
       }
       const approverPermissions = await getUserPermissions(approverUserId);
-      const approverCanVoid = approverPermissions.has("pos:void") || approverPermissions.has("pos:manage");
+      const approverCanVoid = approverPermissions.permissions.has("pos:void") || approverPermissions.permissions.has("pos:manage");
       if (!approverCanVoid) {
         return NextResponse.json({ error: "Approver is not allowed to void POS transactions." }, { status: 403 });
       }
+    }
+
+    if (cashierAccess.restrictions?.require_supervisor_for_void && !approverUserId) {
+      return NextResponse.json({ error: "This cashier requires supervisor approval before voiding a sale." }, { status: 403 });
     }
 
     // Fetch existing sale to confirm it is completable

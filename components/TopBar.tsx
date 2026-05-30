@@ -1,17 +1,62 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, Building2, CalendarDays, Check, ChevronDown, LogOut, MapPin, Search, Settings, Shield, User, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { resolveCurrentUserInfo } from "@/lib/current-user";
+import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
 
 interface TopBarProps { title: string; subtitle?: string; searchPlaceholder?: string; }
 interface Branch { id: string; name: string; is_main?: boolean; }
-interface Notif  { id: string; message: string; created_at: string; read: boolean; type?: string; }
+interface Notif  {
+  id: string;
+  title: string;
+  message: string;
+  created_at: string;
+  is_read: boolean;
+  type?: string;
+  severity?: "info" | "warning" | "critical" | null;
+  action_url?: string | null;
+}
+
+let currentTopBarNow = Date.now();
+const topBarNowListeners = new Set<() => void>();
+let topBarNowIntervalId: number | null = null;
+
+function subscribeTopBarNow(listener: () => void) {
+  topBarNowListeners.add(listener);
+
+  if (topBarNowIntervalId === null && typeof window !== "undefined") {
+    topBarNowIntervalId = window.setInterval(() => {
+      currentTopBarNow = Date.now();
+      topBarNowListeners.forEach((notify) => notify());
+    }, 60_000);
+  }
+
+  return () => {
+    topBarNowListeners.delete(listener);
+
+    if (topBarNowListeners.size === 0 && topBarNowIntervalId !== null) {
+      window.clearInterval(topBarNowIntervalId);
+      topBarNowIntervalId = null;
+    }
+  };
+}
 
 export default function TopBar({ title, subtitle, searchPlaceholder = "Search..." }: TopBarProps) {
   const router = useRouter();
+  const { hasFeature } = useSubscriptionAccess();
+  const mounted = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false
+  );
+  const now = useSyncExternalStore(
+    subscribeTopBarNow,
+    () => currentTopBarNow,
+    () => 0
+  );
 
   // ── User info ──────────────────────────────────────────────────────────────
   const [userInfo, setUserInfo] = useState({ username:"User", displayName:"User", role:"User", initials:"U", userId:"" });
@@ -22,8 +67,6 @@ export default function TopBar({ title, subtitle, searchPlaceholder = "Search...
   const [calYear,       setCalYear]       = useState(() => new Date().getFullYear());
   const [calMonth,      setCalMonth]      = useState(() => new Date().getMonth());
   const dateRef = useRef<HTMLDivElement>(null);
-  const [mounted,       setMounted]       = useState(false);
-  useEffect(() => { setMounted(true); }, []);
 
   const selectDate = (d: Date) => {
     setSelectedDate(d);
@@ -95,22 +138,25 @@ export default function TopBar({ title, subtitle, searchPlaceholder = "Search...
       const found = branches.find(b => b.id === saved) ?? branches.find(b => b.is_main) ?? branches[0];
       if (found) setActiveBranch(found);
 
-      // Notifications — pull from login_history as activity feed
-      if (profileUser?.id) {
-        const { data: hist } = await supabase.from("login_history")
-          .select("id,login_method,success,created_at,ip_address")
-          .order("created_at", { ascending: false }).limit(10);
-        if (!mounted) return;
-        const mapped: Notif[] = (hist ?? []).map((h: Record<string,unknown>) => ({
-          id: String(h.id),
-          message: h.success ? `Login via ${h.login_method} from ${h.ip_address ?? "unknown"}` : `Failed login attempt via ${h.login_method}`,
-          created_at: String(h.created_at),
-          read: false,
-          type: h.success ? "info" : "warn",
-        }));
-        setNotifs(mapped);
-        setUnread(mapped.filter(n => !n.read).length);
-      }
+      const { data: notificationRows } = await supabase
+        .from("notifications")
+        .select("id,title,message,created_at,is_read,notification_type,severity,action_url")
+        .order("created_at", { ascending: false })
+        .limit(12);
+      if (!mounted) return;
+
+      const mapped: Notif[] = (notificationRows ?? []).map((row: Record<string, unknown>) => ({
+        id: String(row.id),
+        title: String(row.title ?? "Notification"),
+        message: String(row.message ?? ""),
+        created_at: String(row.created_at),
+        is_read: Boolean(row.is_read),
+        type: String(row.notification_type ?? "info"),
+        severity: (row.severity as Notif["severity"]) ?? "info",
+        action_url: typeof row.action_url === "string" ? row.action_url : null,
+      }));
+      setNotifs(mapped);
+      setUnread(mapped.filter((n) => !n.is_read).length);
     };
     const { data: sub } = supabase.auth.onAuthStateChange((_, session) => { void load(session?.user); });
     void supabase.auth.getUser().then(({ data }) => load(data.user));
@@ -153,7 +199,12 @@ export default function TopBar({ title, subtitle, searchPlaceholder = "Search...
 
   // ── Mark all read ──────────────────────────────────────────────────────────
   const markAllRead = () => {
-    setNotifs(n => n.map(x => ({ ...x, read: true })));
+    void supabase
+      .from("notifications")
+      .update({ is_read: true, read_at: new Date().toISOString() })
+      .eq("is_read", false);
+
+    setNotifs(n => n.map(x => ({ ...x, is_read: true })));
     setUnread(0);
   };
 
@@ -166,7 +217,7 @@ export default function TopBar({ title, subtitle, searchPlaceholder = "Search...
 
   // ── Time ago ──────────────────────────────────────────────────────────────
   const timeAgo = (iso: string) => {
-    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    const diff = Math.floor((now - new Date(iso).getTime()) / 1000);
     if (diff < 60)   return `${diff}s ago`;
     if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
     if (diff < 86400)return `${Math.floor(diff/3600)}h ago`;
@@ -274,14 +325,17 @@ export default function TopBar({ title, subtitle, searchPlaceholder = "Search...
               <div className="topbar__dropdown topbar__dropdown--notif">
                 <div className="topbar__dropdown-header">
                   <span>Notifications</span>
-                  <button className="topbar__notif-clear" onClick={markAllRead}>Mark all read</button>
+                  <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                    <button className="topbar__notif-clear" onClick={markAllRead}>Mark all read</button>
+                    <button className="topbar__notif-clear" onClick={() => { router.push("/notifications"); setNotifOpen(false); }}>View all</button>
+                  </div>
                 </div>
                 {notifs.length === 0 && <div className="topbar__dropdown-empty">No notifications</div>}
                 {notifs.map(n => (
-                  <div key={n.id} className={`topbar__notif-item ${n.type==="warn"?"topbar__notif-item--warn":""}`}>
-                    <div className="topbar__notif-dot" style={{background:n.type==="warn"?"#f59e0b":"#3b82f6"}}/>
+                  <div key={n.id} className={`topbar__notif-item ${n.severity==="critical"?"topbar__notif-item--warn":""}`}>
+                    <div className="topbar__notif-dot" style={{background:n.severity==="critical"?"#dc2626":n.severity==="warning"?"#f59e0b":"#3b82f6"}}/>
                     <div className="topbar__notif-body">
-                      <div className="topbar__notif-msg">{n.message}</div>
+                      <div className="topbar__notif-msg"><strong>{n.title}</strong>{n.message ? ` - ${n.message}` : ""}</div>
                       <div className="topbar__notif-time">{timeAgo(n.created_at)}</div>
                     </div>
                   </div>
@@ -313,9 +367,17 @@ export default function TopBar({ title, subtitle, searchPlaceholder = "Search...
                 <button className="topbar__menu-item" onClick={() => { router.push("/settings"); setMenuOpen(false); }}>
                   <Settings size={15}/><span>Settings</span>
                 </button>
+                <button className="topbar__menu-item" onClick={() => { router.push("/subscription"); setMenuOpen(false); }}>
+                  <Building2 size={15}/><span>Subscription</span>
+                </button>
                 <button className="topbar__menu-item" onClick={() => { router.push("/security"); setMenuOpen(false); }}>
                   <Shield size={15}/><span>Security Center</span>
                 </button>
+                {hasFeature("audit_logs") ? (
+                  <button className="topbar__menu-item" onClick={() => { router.push("/audit-logs"); setMenuOpen(false); }}>
+                    <Shield size={15}/><span>Audit Logs</span>
+                  </button>
+                ) : null}
                 <button className="topbar__menu-item" onClick={() => { router.push("/users-roles"); setMenuOpen(false); }}>
                   <User size={15}/><span>Manage Users</span>
                 </button>

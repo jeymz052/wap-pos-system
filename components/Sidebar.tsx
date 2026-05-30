@@ -3,16 +3,18 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { FiMenu, FiX } from "react-icons/fi";
 import {
   FaBoxOpen, FaCalculator, FaClipboardList, FaDownload,
   FaFileAlt, FaHistory, FaHome, FaMoneyBillWave, FaPlus,
   FaShoppingCart, FaTruck, FaUserCog, FaUsers, FaBolt, FaCog,
   FaBarcode, FaExchangeAlt, FaFileInvoiceDollar,
-  FaFileInvoice, FaBox, FaUserPlus, FaSignOutAlt, FaShieldAlt,
+  FaFileInvoice, FaBox, FaUserPlus, FaSignOutAlt, FaShieldAlt, FaReceipt, FaClipboardCheck,
+  FaBell, FaCreditCard,
 } from "react-icons/fa";
 import { useRbac } from "@/components/RbacProvider";
+import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
 import { type Permission } from "@/lib/rbac";
 import { supabase } from "@/lib/supabase";
 
@@ -27,11 +29,18 @@ const NAV_ITEMS: Array<{
   { href: "/inventory",   label: "Inventory",    icon: FaBoxOpen,       permission: "inventory:view" },
   { href: "/catalog",     label: "Catalog",      icon: FaBox,           permission: "inventory:view" },
   { href: "/purchasing",  label: "Purchasing",   icon: FaClipboardList, permission: "purchasing:view" },
+  { href: "/sales-orders",label: "Quotes & Orders", icon: FaFileInvoice, permission: "sales_orders:view" },
+  { href: "/expenses",    label: "Expenses",     icon: FaReceipt,       permission: "expenses:view" },
   { href: "/receivables", label: "Receivables",  icon: FaFileAlt,       permission: "receivables:view" },
   { href: "/payables",    label: "Payables",     icon: FaMoneyBillWave, permission: "payables:view" },
   { href: "/customers",   label: "Customers",    icon: FaUsers,         permission: "customers:view" },
+  { href: "/returns",     label: "Returns",      icon: FaExchangeAlt,   permission: "returns:view" },
   { href: "/suppliers",   label: "Suppliers",    icon: FaTruck,         permission: "suppliers:view" },
+  { href: "/branches",    label: "Branches",     icon: FaBoxOpen,        permission: "branches:view" },
   { href: "/reports",     label: "Reports",      icon: FaCalculator,    permission: "reports:view" },
+  { href: "/notifications", label: "Notifications", icon: FaBell,       permission: "notifications:view" },
+  { href: "/subscription", label: "Subscription", icon: FaCreditCard,   permission: "subscriptions:view" },
+  { href: "/audit-logs",  label: "Audit Logs",   icon: FaClipboardCheck, permission: "audit_logs:view" },
   { href: "/users-roles", label: "Users & Roles",icon: FaUserCog,       permission: "users:view" },
   { href: "/settings",    label: "Settings",     icon: FaCog,           permission: "settings:view" },
   { href: "/security",    label: "Security",     icon: FaShieldAlt,     permission: null },
@@ -75,6 +84,16 @@ const QUICK_ACTIONS: Record<string, QuickAction[]> = {
     { id: "purchasing-returns", href: "/purchasing", label: "Purchase Returns", icon: FaFileInvoice, muted: true, permission: "purchasing:view" },
     { id: "purchasing-import", href: "/inventory", label: "Import Items", icon: FaDownload, muted: true, permission: "inventory:create" },
   ],
+  "sales-orders": [
+    { id: "sales-orders-quote", href: "/sales-orders", label: "New Quotation", icon: FaFileInvoice, accent: true, permission: "sales_orders:create" },
+    { id: "sales-orders-order", href: "/sales-orders", label: "New Sales Order", icon: FaClipboardList, muted: true, permission: "sales_orders:create" },
+    { id: "sales-orders-customer", href: "/customers", label: "Customer Pricing", icon: FaUsers, muted: true, permission: "customers:view" },
+  ],
+  expenses: [
+    { id: "expenses-new", href: "/expenses", label: "Record Expense", icon: FaReceipt, accent: true, permission: "expenses:create" },
+    { id: "expenses-approve", href: "/expenses", label: "Approval Queue", icon: FaShieldAlt, muted: true, permission: "expenses:approve" },
+    { id: "expenses-report", href: "/expenses", label: "Expense Report", icon: FaCalculator, muted: true, permission: "expenses:view" },
+  ],
   receivables: [
     { id: "receivables-invoice", href: "/receivables", label: "New Invoice (Credit)", icon: FaFileInvoiceDollar, accent: true, permission: "receivables:create" },
     { id: "receivables-payment", href: "/receivables", label: "Receive Payment", icon: FaMoneyBillWave, success: true, permission: "receivables:edit" },
@@ -94,15 +113,40 @@ const QUICK_ACTIONS: Record<string, QuickAction[]> = {
     { id: "customers-statements", href: "/customers", label: "Customer Statements", icon: FaFileAlt, muted: true, permission: "customers:view" },
     { id: "customers-import", href: "/customers", label: "Import Customers", icon: FaDownload, muted: true, permission: "customers:create" },
   ],
+  returns: [
+    { id: "returns-new", href: "/returns", label: "New Return Request", icon: FaExchangeAlt, accent: true, permission: "returns:create" },
+    { id: "returns-approvals", href: "/returns", label: "Refund Approvals", icon: FaShieldAlt, muted: true, permission: "returns:manage" },
+    { id: "returns-warranty", href: "/returns", label: "Warranty Claims", icon: FaHistory, muted: true, permission: "returns:view" },
+  ],
   suppliers: [
     { id: "suppliers-add", href: "/suppliers", label: "Add New Supplier", icon: FaTruck, accent: true, permission: "suppliers:create" },
     { id: "suppliers-po", href: "/purchasing", label: "Create Purchase Order", icon: FaClipboardList, muted: true, permission: "purchasing:create" },
     { id: "suppliers-import", href: "/suppliers", label: "Import Suppliers", icon: FaDownload, muted: true, permission: "suppliers:create" },
   ],
+  branches: [
+    { id: "branches-view", href: "/branches", label: "Owner Dashboard", icon: FaHome, accent: true, permission: "branches:view" },
+    { id: "branches-transfer", href: "/branches", label: "Branch Transfers", icon: FaExchangeAlt, muted: true, permission: "inventory:transfer_stock" },
+    { id: "branches-pricing", href: "/branches", label: "Branch Pricing", icon: FaMoneyBillWave, muted: true, permission: "branches:manage" },
+  ],
   reports: [
     { id: "reports-sales", href: "/reports", label: "Sales Report", icon: FaCalculator, accent: true, permission: "reports:view" },
     { id: "reports-inventory", href: "/reports", label: "Inventory Report", icon: FaBoxOpen, muted: true, permission: "reports:view" },
     { id: "reports-aging", href: "/reports", label: "Aging Report", icon: FaHistory, muted: true, permission: "reports:view" },
+  ],
+  notifications: [
+    { id: "notifications-inbox", href: "/notifications", label: "Alert Inbox", icon: FaBell, accent: true, permission: "notifications:view" },
+    { id: "notifications-inventory", href: "/inventory", label: "Inventory Health", icon: FaBoxOpen, muted: true, permission: "inventory:view" },
+    { id: "notifications-receivables", href: "/receivables", label: "Credit Follow-up", icon: FaMoneyBillWave, muted: true, permission: "receivables:view" },
+  ],
+  subscription: [
+    { id: "subscription-plan", href: "/subscription", label: "Plan & Limits", icon: FaCreditCard, accent: true, permission: "subscriptions:view" },
+    { id: "subscription-billing", href: "/subscription", label: "Billing History", icon: FaFileInvoiceDollar, muted: true, permission: "subscriptions:view" },
+    { id: "subscription-settings", href: "/settings", label: "System Settings", icon: FaCog, muted: true, permission: "settings:view" },
+  ],
+  "audit-logs": [
+    { id: "audit-logs-activity", href: "/audit-logs", label: "Activity Trail", icon: FaClipboardCheck, accent: true, permission: "audit_logs:view" },
+    { id: "audit-logs-logins", href: "/audit-logs?kind=login_history", label: "Login History", icon: FaShieldAlt, muted: true, permission: "audit_logs:view" },
+    { id: "audit-logs-voids", href: "/audit-logs?kind=void_log", label: "Void & Refund Logs", icon: FaHistory, muted: true, permission: "audit_logs:view" },
   ],
   "users-roles": [
     { id: "users-add", href: "/users-roles", label: "Add New User", icon: FaUserCog, accent: true, permission: "users:create" },
@@ -129,23 +173,35 @@ export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { can } = useRbac();
+  const { hasFeature } = useSubscriptionAccess();
   const activeSection = getActiveSection(pathname);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   // mounted guard — prevents SSR/client HTML mismatch from permission filtering
-  const [mounted, setMounted] = useState(false);
+  const mounted = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false
+  );
 
   useEffect(() => {
     document.documentElement.style.setProperty("--sidebar-width", "156px");
-    setMounted(true);
   }, []);
 
   // Before mount, show all items (matches SSR output). After mount, apply RBAC filter.
   const visibleNav = mounted
-    ? NAV_ITEMS.filter((item) => item.permission === null || can(item.permission))
+    ? NAV_ITEMS.filter((item) => {
+        if (item.href === "/audit-logs" && !hasFeature("audit_logs")) return false;
+        return item.permission === null || can(item.permission);
+      })
     : NAV_ITEMS;
 
   const quickActions = mounted
-    ? (QUICK_ACTIONS[activeSection] ?? []).filter((qa) => !qa.permission || can(qa.permission))
+    ? (QUICK_ACTIONS[activeSection] ?? []).filter((qa) => {
+        if (qa.id === "branches-transfer" && !hasFeature("multi_branch_transfers")) return false;
+        if (qa.id === "inventory-barcode" && !hasFeature("barcode_printing")) return false;
+        if (activeSection === "audit-logs" && !hasFeature("audit_logs")) return false;
+        return !qa.permission || can(qa.permission);
+      })
     : (QUICK_ACTIONS[activeSection] ?? []);
 
   async function handleSignOut() {

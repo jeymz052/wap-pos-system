@@ -3,8 +3,8 @@
 import { Suspense } from "react";
 
 import Image from "next/image";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState, useEffect, useRef, type FormEvent } from "react";
+import { useSearchParams } from "next/navigation";
+import { useState, useEffect, useRef, useCallback, type FormEvent } from "react";
 import {
   AlertTriangle,
   Boxes,
@@ -26,17 +26,33 @@ import {
   X,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { evaluatePassword, detectDeviceName, formatLockCountdown } from "@/lib/auth-security";
+import {
+  DEFAULT_POLICY,
+  evaluatePassword,
+  detectDeviceName,
+  formatLockCountdown,
+  type PasswordPolicy,
+} from "@/lib/auth-security";
+import { isPasswordExpired, normalizeSecurityPolicy } from "@/lib/security-policy";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type LoginStep = "credentials" | "2fa" | "pin";
 type ModalType = "forgot-password" | "reset-sent" | "inactivity" | null;
+type UserAuthRow = {
+  id: string;
+  locked_until: string | null;
+  failed_login_attempts: number | null;
+  two_factor_enabled: boolean | null;
+  is_active: boolean | null;
+  allow_login: boolean | null;
+  roles?: { name?: string | null } | null;
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function PasswordStrengthBar({ password }: { password: string }) {
-  const strength = evaluatePassword(password);
+function PasswordStrengthBar({ password, policy }: { password: string; policy: PasswordPolicy }) {
+  const strength = evaluatePassword(password, policy);
   if (!password) return null;
   return (
     <div className="pwd-strength">
@@ -59,7 +75,6 @@ function PasswordStrengthBar({ password }: { password: string }) {
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 function LoginPageInner() {
-  const router = useRouter();
   const searchParams = useSearchParams();
 
   // Step & modal state
@@ -74,12 +89,13 @@ function LoginPageInner() {
 
   // PIN login
   const [pinIdentifier, setPinIdentifier] = useState("");
-  const [pinDigits, setPinDigits]         = useState(["", "", "", ""]);
+  const [pinDigits, setPinDigits]         = useState<string[]>(Array.from({ length: 8 }, () => ""));
   const pinRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   // 2FA
   const [totpCode, setTotpCode]   = useState("");
   const [tempSession, setTempSession] = useState<string | null>(null);
+  const [totpFactorId, setTotpFactorId] = useState<string | null>(null);
 
   // Forgot password
   const [forgotIdentifier, setForgotIdentifier] = useState("");
@@ -90,14 +106,32 @@ function LoginPageInner() {
   const [error, setError]           = useState("");
   const [lockedUntil, setLockedUntil] = useState<string | null>(null);
   const [lockCountdown, setLockCountdown] = useState("");
+  const [securityPolicy, setSecurityPolicy] = useState<PasswordPolicy>(DEFAULT_POLICY);
+
+  const loadSecurityPolicy = useCallback(async () => {
+    const { data, error: policyError } = await supabase.rpc("get_password_policy");
+    if (!policyError) {
+      setSecurityPolicy(normalizeSecurityPolicy((data as Record<string, unknown> | null) ?? null));
+    }
+  }, []);
 
   // ── Check inactivity redirect ──────────────────────────────────────────────
   useEffect(() => {
     const reason = searchParams?.get("reason");
     if (reason === "inactivity") {
-      setModal("inactivity");
+      const timer = window.setTimeout(() => {
+        setModal("inactivity");
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadSecurityPolicy();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadSecurityPolicy]);
 
   // ── Countdown timer for account lock ─────────────────────────────────────
   useEffect(() => {
@@ -118,9 +152,9 @@ function LoginPageInner() {
   // ── Already logged in? → skip to dashboard ───────────────────────────────
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) router.replace("/dashboard");
+      if (session?.user) window.location.replace("/dashboard");
     });
-  }, [router]);
+  }, []);
 
   // ─── Password Login ────────────────────────────────────────────────────────
 
@@ -146,11 +180,12 @@ function LoginPageInner() {
     }
 
     // Check if account is locked before attempting Supabase auth
-    const { data: userRow } = await supabase
+    const { data: userRowData } = await supabase
       .from("users")
-      .select("id, locked_until, failed_login_attempts, two_factor_enabled, is_active, allow_login")
+      .select("id, locked_until, failed_login_attempts, two_factor_enabled, is_active, allow_login, roles(name)")
       .eq("email", email)
       .maybeSingle();
+    const userRow = (userRowData as UserAuthRow | null) ?? null;
 
     if (userRow) {
       if (!userRow.is_active || !userRow.allow_login) {
@@ -193,9 +228,29 @@ function LoginPageInner() {
       return;
     }
 
+    const roleName = (userRow?.roles as { name?: string | null } | null)?.name ?? "";
+    const isPrivilegedRole = roleName === "super_admin" || roleName === "admin";
+    const requireAdmin2fa = securityPolicy.require_2fa_for_admins;
+    const mustSetupAdmin2fa = isPrivilegedRole && requireAdmin2fa && !userRow?.two_factor_enabled;
+
+    if (mustSetupAdmin2fa) {
+      await finalizeLogin(authData.session?.access_token ?? "", "password", { redirectToSecuritySetup: true });
+      return;
+    }
+
     // Check if 2FA is required
     if (userRow?.two_factor_enabled) {
+      const { data: factorData } = await supabase.auth.mfa.listFactors();
+      const verifiedTotpFactor = factorData?.totp.find((factor) => factor.status === "verified") ?? null;
+      if (!verifiedTotpFactor?.id) {
+        setError("Two-factor authentication is enabled, but no verified authenticator factor was found.");
+        await supabase.auth.signOut();
+        setLoading(false);
+        return;
+      }
+
       setTempSession(authData.session?.access_token ?? null);
+      setTotpFactorId(verifiedTotpFactor.id);
       setStep("2fa");
       setLoading(false);
       return;
@@ -217,18 +272,31 @@ function LoginPageInner() {
       return;
     }
 
+    if (!totpFactorId) {
+      setError("Your 2FA session has expired. Please sign in with your password again.");
+      setLoading(false);
+      return;
+    }
+
     // Verify via Supabase MFA
     let mfaSession: { access_token: string } | null = null;
     let mfaError: Error | null = null;
     try {
-      const mfaResult = await supabase.auth.mfa.challengeAndVerify({
-        factorId: "totp",
-        code: totpCode,
-      });
-      if (mfaResult.error) {
-        mfaError = new Error(mfaResult.error.message);
+      const challengeResult = await supabase.auth.mfa.challenge({ factorId: totpFactorId });
+      if (challengeResult.error || !challengeResult.data) {
+        mfaError = new Error(challengeResult.error?.message ?? "MFA challenge failed");
       } else {
-        mfaSession = (mfaResult.data as unknown as { session?: { access_token: string } })?.session ?? null;
+        const verifyResult = await supabase.auth.mfa.verify({
+          factorId: totpFactorId,
+          challengeId: challengeResult.data.id,
+          code: totpCode,
+        });
+
+        if (verifyResult.error) {
+          mfaError = new Error(verifyResult.error.message);
+        } else {
+          mfaSession = (verifyResult.data as unknown as { session?: { access_token: string } })?.session ?? null;
+        }
       }
     } catch {
       mfaError = new Error("MFA verify failed");
@@ -249,9 +317,9 @@ function LoginPageInner() {
     e.preventDefault();
     setError("");
 
-    const pin = pinDigits.join("");
-    if (pin.length !== 4) {
-      setError("Please enter your full 4-digit PIN.");
+    const pin = pinDigits.slice(0, securityPolicy.pin_length).join("");
+    if (pin.length !== securityPolicy.pin_length) {
+      setError(`Please enter your full ${securityPolicy.pin_length}-digit PIN.`);
       return;
     }
 
@@ -267,7 +335,7 @@ function LoginPageInner() {
 
     if (!res.ok || !json.ok) {
       setError(json.error ?? "PIN login failed.");
-      setPinDigits(["", "", "", ""]);
+      setPinDigits(Array.from({ length: 8 }, () => ""));
       pinRefs.current[0]?.focus();
       setLoading(false);
       return;
@@ -297,7 +365,11 @@ function LoginPageInner() {
 
   // ─── Finalize successful login ─────────────────────────────────────────────
 
-  const finalizeLogin = async (accessToken: string, method: string) => {
+  const finalizeLogin = async (
+    accessToken: string,
+    method: string,
+    options?: { redirectToSecuritySetup?: boolean }
+  ) => {
     const { data: { user: signedInUser } } = await supabase.auth.getUser();
 
     if (signedInUser) {
@@ -329,8 +401,30 @@ function LoginPageInner() {
       sessionStorage.removeItem("sb-session");
     }
 
-    router.push("/dashboard");
-    router.refresh();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    let redirectTarget = options?.redirectToSecuritySetup ? "/security?setup2fa=required" : "/dashboard";
+
+    if (!options?.redirectToSecuritySetup && session?.access_token) {
+      const accessResponse = await fetch("/api/auth/access", {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+
+      const accessPayload = (await accessResponse.json()) as {
+        user?: { require_password_change?: boolean | null; password_expires_at?: string | null } | null;
+      };
+
+      if (accessPayload.user?.require_password_change || isPasswordExpired(accessPayload.user?.password_expires_at)) {
+        const reason = accessPayload.user?.require_password_change ? "password_update_required" : "password_expired";
+        redirectTarget = `/security?tab=password&reason=${reason}`;
+      }
+    }
+
+    window.location.replace(redirectTarget);
   };
 
   // ─── PIN digit input handler ───────────────────────────────────────────────
@@ -340,7 +434,7 @@ function LoginPageInner() {
     const next = [...pinDigits];
     next[index] = digit;
     setPinDigits(next);
-    if (digit && index < 3) pinRefs.current[index + 1]?.focus();
+    if (digit && index < securityPolicy.pin_length - 1) pinRefs.current[index + 1]?.focus();
   };
 
   const handlePinKeyDown = (index: number, e: React.KeyboardEvent) => {
@@ -474,7 +568,7 @@ function LoginPageInner() {
                         {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                       </button>
                     </div>
-                    <PasswordStrengthBar password={password} />
+                    <PasswordStrengthBar password={password} policy={securityPolicy} />
                   </label>
 
                   <div className="login-form__row">
@@ -514,20 +608,10 @@ function LoginPageInner() {
                     disabled={loading || !!lockedUntil}
                   >
                     {loading ? <RefreshCw size={16} className="spin" /> : <LogIn size={16} />}
-                    <span>{loading ? "Signing In…" : "Sign In"}</span>
+                    <span>{loading ? "Signing In..." : "Sign In"}</span>
                   </button>
 
-                  <div className="login-form__divider">or</div>
-
-                  <button
-                    id="btn-sign-in-2fa"
-                    type="button"
-                    className="login-form__secondary"
-                    onClick={() => { setStep("2fa"); setError(""); }}
-                  >
-                    <ShieldCheck size={16} />
-                    <span>Sign in with 2FA Code</span>
-                  </button>
+                  <div className="login-form__divider">2FA is verified after your password</div>
 
                   <p className="login-form__footer">
                     {"Don't have an account? "}
@@ -577,15 +661,20 @@ function LoginPageInner() {
 
                   <button id="btn-verify-2fa" type="submit" className="login-form__submit" disabled={loading}>
                     {loading ? <RefreshCw size={16} className="spin" /> : <ShieldCheck size={16} />}
-                    <span>{loading ? "Verifying…" : "Verify & Sign In"}</span>
+                    <span>{loading ? "Verifying..." : "Verify & Sign In"}</span>
                   </button>
 
                   <button
                     type="button"
                     className="login-form__back"
-                    onClick={() => { setStep("credentials"); setError(""); setTotpCode(""); }}
+                    onClick={() => {
+                      setStep("credentials");
+                      setError("");
+                      setTotpCode("");
+                      setTotpFactorId(null);
+                    }}
                   >
-                    ← Back to login
+                    Back to login
                   </button>
                 </form>
               </>
@@ -621,9 +710,9 @@ function LoginPageInner() {
                   </label>
 
                   <div className="login-form__field">
-                    <span className="login-form__label">4-Digit PIN</span>
+                    <span className="login-form__label">{securityPolicy.pin_length}-Digit PIN</span>
                     <div className="login-form__pin-wrap">
-                      {pinDigits.map((d, i) => (
+                      {pinDigits.slice(0, securityPolicy.pin_length).map((d, i) => (
                         <input
                           key={i}
                           ref={el => { pinRefs.current[i] = el; }}
@@ -652,15 +741,15 @@ function LoginPageInner() {
                     id="btn-pin-submit"
                     type="submit"
                     className="login-form__submit"
-                    disabled={loading || pinDigits.join("").length < 4 || !pinIdentifier}
+                    disabled={loading || pinDigits.slice(0, securityPolicy.pin_length).join("").length < securityPolicy.pin_length || !pinIdentifier}
                   >
                     {loading ? <RefreshCw size={16} className="spin" /> : <LogIn size={16} />}
-                    <span>{loading ? "Verifying…" : "Sign In with PIN"}</span>
+                    <span>{loading ? "Verifying..." : "Sign In with PIN"}</span>
                   </button>
 
                   <p className="login-form__footer">
                     <Info size={12} style={{ display: "inline", marginRight: 4 }} />
-                    PIN login is for cashier roles only.
+                    PIN login is for cashier roles only and currently requires {securityPolicy.pin_length} digits.
                   </p>
                 </form>
               </>
@@ -686,7 +775,7 @@ function LoginPageInner() {
             </div>
             <h3 className="auth-modal__title">Reset Password</h3>
             <p className="auth-modal__body">
-              Enter your username or email. We'll send a reset link if the account exists.
+              Enter your username or email. We&apos;ll send a reset link if the account exists.
             </p>
             <form onSubmit={handleForgotPassword} id="form-forgot-password">
               <div className="login-form__input-wrap" style={{ marginBottom: 16 }}>
@@ -708,7 +797,7 @@ function LoginPageInner() {
                 disabled={forgotLoading}
               >
                 {forgotLoading ? <RefreshCw size={16} className="spin" /> : <Mail size={16} />}
-                <span>{forgotLoading ? "Sending…" : "Send Reset Link"}</span>
+                <span>{forgotLoading ? "Sending..." : "Send Reset Link"}</span>
               </button>
             </form>
           </div>

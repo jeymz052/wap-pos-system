@@ -12,11 +12,9 @@ export async function POST(req: NextRequest) {
     const token = (req.headers.get("authorization") ?? "").replace("Bearer ", "").trim();
     if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    // Verify caller is authenticated
     const { data: { user }, error: authErr } = await supabaseAdmin.auth.getUser(token);
     if (authErr || !user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    // Verify caller is admin / super_admin
     const { data: callerProfile } = await supabaseAdmin
       .from("users")
       .select("id, roles(name)")
@@ -35,7 +33,6 @@ export async function POST(req: NextRequest) {
     };
 
     const { user_id, pin, action = "set" } = body;
-
     if (!user_id) {
       return NextResponse.json({ error: "user_id is required." }, { status: 400 });
     }
@@ -46,12 +43,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, message: "PIN cleared." });
     }
 
-    // action === "set"
-    if (!pin || !/^\d{4,8}$/.test(pin)) {
-      return NextResponse.json({ error: "PIN must be 4–8 digits." }, { status: 400 });
+    const policyResult = await supabaseAdmin.rpc("get_password_policy");
+    if (policyResult.error) {
+      return NextResponse.json({ error: policyResult.error.message }, { status: 500 });
     }
 
-    // Verify target user exists and is a cashier role (or allow admin override)
+    const pinLength = Number((policyResult.data as Record<string, unknown> | null)?.pin_length ?? 4);
+    if (!pin || !new RegExp(`^\\d{${pinLength},8}$`).test(pin)) {
+      return NextResponse.json({ error: `PIN must be ${pinLength} to 8 digits.` }, { status: 400 });
+    }
+
     const { data: targetUser } = await supabaseAdmin
       .from("users")
       .select("id, username, roles(name)")
@@ -62,10 +63,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Target user not found." }, { status: 404 });
     }
 
-    // Use the DB function — bcrypt hashing happens inside PostgreSQL via pgcrypto
     const { error: setError } = await supabaseAdmin.rpc("set_cashier_pin", {
       p_user_id: user_id,
-      p_pin:     pin,
+      p_pin: pin,
     });
 
     if (setError) {

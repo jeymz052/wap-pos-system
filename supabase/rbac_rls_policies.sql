@@ -26,7 +26,16 @@ ALTER TABLE IF EXISTS inventory_stocks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS sales ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS sale_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS sale_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS quotations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS quotation_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS sales_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS sales_order_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS customer_product_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS product_bulk_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS stock_reservations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS quotation_email_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS purchase_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS purchase_order_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS supplier_payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS expenses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS receivables ENABLE ROW LEVEL SECURITY;
@@ -207,10 +216,55 @@ DROP POLICY IF EXISTS "sale_payments_insert" ON sale_payments;
 DROP POLICY IF EXISTS "sale_payments_update" ON sale_payments;
 DROP POLICY IF EXISTS "sale_payments_delete" ON sale_payments;
 
+DROP POLICY IF EXISTS "quotations_select" ON quotations;
+DROP POLICY IF EXISTS "quotations_insert" ON quotations;
+DROP POLICY IF EXISTS "quotations_update" ON quotations;
+DROP POLICY IF EXISTS "quotations_delete" ON quotations;
+
+DROP POLICY IF EXISTS "quotation_items_select" ON quotation_items;
+DROP POLICY IF EXISTS "quotation_items_insert" ON quotation_items;
+DROP POLICY IF EXISTS "quotation_items_update" ON quotation_items;
+DROP POLICY IF EXISTS "quotation_items_delete" ON quotation_items;
+
+DROP POLICY IF EXISTS "sales_orders_select" ON sales_orders;
+DROP POLICY IF EXISTS "sales_orders_insert" ON sales_orders;
+DROP POLICY IF EXISTS "sales_orders_update" ON sales_orders;
+DROP POLICY IF EXISTS "sales_orders_delete" ON sales_orders;
+
+DROP POLICY IF EXISTS "sales_order_items_select" ON sales_order_items;
+DROP POLICY IF EXISTS "sales_order_items_insert" ON sales_order_items;
+DROP POLICY IF EXISTS "sales_order_items_update" ON sales_order_items;
+DROP POLICY IF EXISTS "sales_order_items_delete" ON sales_order_items;
+
+DROP POLICY IF EXISTS "customer_product_pricing_select" ON customer_product_pricing;
+DROP POLICY IF EXISTS "customer_product_pricing_insert" ON customer_product_pricing;
+DROP POLICY IF EXISTS "customer_product_pricing_update" ON customer_product_pricing;
+DROP POLICY IF EXISTS "customer_product_pricing_delete" ON customer_product_pricing;
+
+DROP POLICY IF EXISTS "product_bulk_pricing_select" ON product_bulk_pricing;
+DROP POLICY IF EXISTS "product_bulk_pricing_insert" ON product_bulk_pricing;
+DROP POLICY IF EXISTS "product_bulk_pricing_update" ON product_bulk_pricing;
+DROP POLICY IF EXISTS "product_bulk_pricing_delete" ON product_bulk_pricing;
+
+DROP POLICY IF EXISTS "stock_reservations_select" ON stock_reservations;
+DROP POLICY IF EXISTS "stock_reservations_insert" ON stock_reservations;
+DROP POLICY IF EXISTS "stock_reservations_update" ON stock_reservations;
+DROP POLICY IF EXISTS "stock_reservations_delete" ON stock_reservations;
+
+DROP POLICY IF EXISTS "quotation_email_logs_select" ON quotation_email_logs;
+DROP POLICY IF EXISTS "quotation_email_logs_insert" ON quotation_email_logs;
+DROP POLICY IF EXISTS "quotation_email_logs_update" ON quotation_email_logs;
+DROP POLICY IF EXISTS "quotation_email_logs_delete" ON quotation_email_logs;
+
 DROP POLICY IF EXISTS "purchase_orders_select" ON purchase_orders;
 DROP POLICY IF EXISTS "purchase_orders_insert" ON purchase_orders;
 DROP POLICY IF EXISTS "purchase_orders_update" ON purchase_orders;
 DROP POLICY IF EXISTS "purchase_orders_delete" ON purchase_orders;
+
+DROP POLICY IF EXISTS "purchase_order_items_select" ON purchase_order_items;
+DROP POLICY IF EXISTS "purchase_order_items_insert" ON purchase_order_items;
+DROP POLICY IF EXISTS "purchase_order_items_update" ON purchase_order_items;
+DROP POLICY IF EXISTS "purchase_order_items_delete" ON purchase_order_items;
 
 DROP POLICY IF EXISTS "supplier_payments_select" ON supplier_payments;
 DROP POLICY IF EXISTS "supplier_payments_insert" ON supplier_payments;
@@ -845,6 +899,440 @@ CREATE POLICY "sale_payments_update" ON sale_payments
     )
   );
 
+CREATE POLICY "quotations_select" ON quotations
+  FOR SELECT
+  USING (
+    public.has_permission('sales_orders', 'view')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "quotations_insert" ON quotations
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('sales_orders', 'create')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "quotations_update" ON quotations
+  FOR UPDATE
+  USING (
+    (
+      public.has_permission('sales_orders', 'edit')
+      OR public.has_permission('sales_orders', 'approve')
+      OR public.has_permission('sales_orders', 'email')
+      OR public.has_permission('sales_orders', 'manage')
+    )
+    AND public.can_access_branch(branch_id)
+  )
+  WITH CHECK (
+    (
+      public.has_permission('sales_orders', 'edit')
+      OR public.has_permission('sales_orders', 'approve')
+      OR public.has_permission('sales_orders', 'email')
+      OR public.has_permission('sales_orders', 'manage')
+    )
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "quotations_delete" ON quotations
+  FOR DELETE
+  USING (
+    public.has_permission('sales_orders', 'manage')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "quotation_items_select" ON quotation_items
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_items.quotation_id
+        AND public.has_permission('sales_orders', 'view')
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
+CREATE POLICY "quotation_items_insert" ON quotation_items
+  FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_items.quotation_id
+        AND (
+          public.has_permission('sales_orders', 'create')
+          OR public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
+CREATE POLICY "quotation_items_update" ON quotation_items
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_items.quotation_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(q.branch_id)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_items.quotation_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
+CREATE POLICY "quotation_items_delete" ON quotation_items
+  FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_items.quotation_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
+CREATE POLICY "sales_orders_select" ON sales_orders
+  FOR SELECT
+  USING (
+    public.has_permission('sales_orders', 'view')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "sales_orders_insert" ON sales_orders
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('sales_orders', 'create')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "sales_orders_update" ON sales_orders
+  FOR UPDATE
+  USING (
+    (
+      public.has_permission('sales_orders', 'edit')
+      OR public.has_permission('sales_orders', 'approve')
+      OR public.has_permission('sales_orders', 'manage')
+    )
+    AND public.can_access_branch(branch_id)
+  )
+  WITH CHECK (
+    (
+      public.has_permission('sales_orders', 'edit')
+      OR public.has_permission('sales_orders', 'approve')
+      OR public.has_permission('sales_orders', 'manage')
+    )
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "sales_orders_delete" ON sales_orders
+  FOR DELETE
+  USING (
+    public.has_permission('sales_orders', 'manage')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "sales_order_items_select" ON sales_order_items
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.sales_orders so
+      WHERE so.id = sales_order_items.sales_order_id
+        AND public.has_permission('sales_orders', 'view')
+        AND public.can_access_branch(so.branch_id)
+    )
+  );
+
+CREATE POLICY "sales_order_items_insert" ON sales_order_items
+  FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.sales_orders so
+      WHERE so.id = sales_order_items.sales_order_id
+        AND (
+          public.has_permission('sales_orders', 'create')
+          OR public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(so.branch_id)
+    )
+  );
+
+CREATE POLICY "sales_order_items_update" ON sales_order_items
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.sales_orders so
+      WHERE so.id = sales_order_items.sales_order_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'approve')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(so.branch_id)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.sales_orders so
+      WHERE so.id = sales_order_items.sales_order_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'approve')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(so.branch_id)
+    )
+  );
+
+CREATE POLICY "sales_order_items_delete" ON sales_order_items
+  FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.sales_orders so
+      WHERE so.id = sales_order_items.sales_order_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(so.branch_id)
+    )
+  );
+
+CREATE POLICY "customer_product_pricing_select" ON customer_product_pricing
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.customers c
+      WHERE c.id = customer_product_pricing.customer_id
+        AND (
+          public.has_permission('sales_orders', 'view')
+          OR public.has_permission('customers', 'view')
+        )
+        AND public.can_access_branch(c.branch_id)
+    )
+  );
+
+CREATE POLICY "customer_product_pricing_insert" ON customer_product_pricing
+  FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.customers c
+      WHERE c.id = customer_product_pricing.customer_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(c.branch_id)
+    )
+  );
+
+CREATE POLICY "customer_product_pricing_update" ON customer_product_pricing
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.customers c
+      WHERE c.id = customer_product_pricing.customer_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(c.branch_id)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.customers c
+      WHERE c.id = customer_product_pricing.customer_id
+        AND (
+          public.has_permission('sales_orders', 'edit')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(c.branch_id)
+    )
+  );
+
+CREATE POLICY "customer_product_pricing_delete" ON customer_product_pricing
+  FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.customers c
+      WHERE c.id = customer_product_pricing.customer_id
+        AND public.has_permission('sales_orders', 'manage')
+        AND public.can_access_branch(c.branch_id)
+    )
+  );
+
+CREATE POLICY "product_bulk_pricing_select" ON product_bulk_pricing
+  FOR SELECT
+  USING (
+    public.has_permission('sales_orders', 'view')
+    OR public.has_permission('inventory', 'view')
+  );
+
+CREATE POLICY "product_bulk_pricing_insert" ON product_bulk_pricing
+  FOR INSERT
+  WITH CHECK (
+    public.has_permission('sales_orders', 'edit')
+    OR public.has_permission('sales_orders', 'manage')
+  );
+
+CREATE POLICY "product_bulk_pricing_update" ON product_bulk_pricing
+  FOR UPDATE
+  USING (
+    public.has_permission('sales_orders', 'edit')
+    OR public.has_permission('sales_orders', 'manage')
+  )
+  WITH CHECK (
+    public.has_permission('sales_orders', 'edit')
+    OR public.has_permission('sales_orders', 'manage')
+  );
+
+CREATE POLICY "product_bulk_pricing_delete" ON product_bulk_pricing
+  FOR DELETE
+  USING (
+    public.has_permission('sales_orders', 'manage')
+  );
+
+CREATE POLICY "stock_reservations_select" ON stock_reservations
+  FOR SELECT
+  USING (
+    public.has_permission('sales_orders', 'view')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "stock_reservations_insert" ON stock_reservations
+  FOR INSERT
+  WITH CHECK (
+    (
+      public.has_permission('sales_orders', 'edit')
+      OR public.has_permission('sales_orders', 'approve')
+      OR public.has_permission('sales_orders', 'manage')
+    )
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "stock_reservations_update" ON stock_reservations
+  FOR UPDATE
+  USING (
+    (
+      public.has_permission('sales_orders', 'edit')
+      OR public.has_permission('sales_orders', 'approve')
+      OR public.has_permission('sales_orders', 'manage')
+    )
+    AND public.can_access_branch(branch_id)
+  )
+  WITH CHECK (
+    (
+      public.has_permission('sales_orders', 'edit')
+      OR public.has_permission('sales_orders', 'approve')
+      OR public.has_permission('sales_orders', 'manage')
+    )
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "stock_reservations_delete" ON stock_reservations
+  FOR DELETE
+  USING (
+    public.has_permission('sales_orders', 'manage')
+    AND public.can_access_branch(branch_id)
+  );
+
+CREATE POLICY "quotation_email_logs_select" ON quotation_email_logs
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_email_logs.quotation_id
+        AND public.has_permission('sales_orders', 'view')
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
+CREATE POLICY "quotation_email_logs_insert" ON quotation_email_logs
+  FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_email_logs.quotation_id
+        AND (
+          public.has_permission('sales_orders', 'email')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
+CREATE POLICY "quotation_email_logs_update" ON quotation_email_logs
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_email_logs.quotation_id
+        AND (
+          public.has_permission('sales_orders', 'email')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(q.branch_id)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_email_logs.quotation_id
+        AND (
+          public.has_permission('sales_orders', 'email')
+          OR public.has_permission('sales_orders', 'manage')
+        )
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
+CREATE POLICY "quotation_email_logs_delete" ON quotation_email_logs
+  FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.quotations q
+      WHERE q.id = quotation_email_logs.quotation_id
+        AND public.has_permission('sales_orders', 'manage')
+        AND public.can_access_branch(q.branch_id)
+    )
+  );
+
 CREATE POLICY "purchase_orders_select" ON purchase_orders
   FOR SELECT
   USING (
@@ -888,6 +1376,77 @@ CREATE POLICY "purchase_orders_delete" ON purchase_orders
     AND public.can_access_branch(branch_id)
   );
 
+CREATE POLICY "purchase_order_items_select" ON purchase_order_items
+  FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.purchase_orders po
+      WHERE po.id = purchase_order_items.po_id
+        AND public.has_permission('purchasing', 'view')
+        AND public.can_access_branch(po.branch_id)
+    )
+  );
+
+CREATE POLICY "purchase_order_items_insert" ON purchase_order_items
+  FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.purchase_orders po
+      WHERE po.id = purchase_order_items.po_id
+        AND (
+          public.has_permission('purchasing', 'create')
+          OR public.has_permission('purchasing', 'edit')
+          OR public.has_permission('purchasing', 'manage')
+        )
+        AND public.can_access_branch(po.branch_id)
+    )
+  );
+
+CREATE POLICY "purchase_order_items_update" ON purchase_order_items
+  FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.purchase_orders po
+      WHERE po.id = purchase_order_items.po_id
+        AND (
+          public.has_permission('purchasing', 'edit')
+          OR public.has_permission('purchasing', 'manage')
+        )
+        AND public.can_access_branch(po.branch_id)
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM public.purchase_orders po
+      WHERE po.id = purchase_order_items.po_id
+        AND (
+          public.has_permission('purchasing', 'edit')
+          OR public.has_permission('purchasing', 'manage')
+        )
+        AND public.can_access_branch(po.branch_id)
+    )
+  );
+
+CREATE POLICY "purchase_order_items_delete" ON purchase_order_items
+  FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.purchase_orders po
+      WHERE po.id = purchase_order_items.po_id
+        AND (
+          public.has_permission('purchasing', 'delete')
+          OR public.has_permission('purchasing', 'edit')
+          OR public.has_permission('purchasing', 'manage')
+        )
+        AND public.can_access_branch(po.branch_id)
+    )
+  );
+
 CREATE POLICY "supplier_payments_select" ON supplier_payments
   FOR SELECT
   USING (
@@ -895,7 +1454,11 @@ CREATE POLICY "supplier_payments_select" ON supplier_payments
       SELECT 1
       FROM public.purchase_orders po
       WHERE po.id = supplier_payments.po_id
-        AND public.has_permission('payables', 'view')
+        AND (
+          public.has_permission('payables', 'view')
+          OR public.has_permission('purchasing', 'view')
+          OR public.has_permission('purchasing', 'manage')
+        )
         AND public.can_access_branch(po.branch_id)
     )
   );
@@ -911,6 +1474,8 @@ CREATE POLICY "supplier_payments_insert" ON supplier_payments
           public.has_permission('payables', 'create')
           OR public.has_permission('payables', 'edit')
           OR public.has_permission('payables', 'manage')
+          OR public.has_permission('purchasing', 'edit')
+          OR public.has_permission('purchasing', 'manage')
         )
         AND public.can_access_branch(po.branch_id)
     )
@@ -926,6 +1491,8 @@ CREATE POLICY "supplier_payments_update" ON supplier_payments
         AND (
           public.has_permission('payables', 'edit')
           OR public.has_permission('payables', 'manage')
+          OR public.has_permission('purchasing', 'edit')
+          OR public.has_permission('purchasing', 'manage')
         )
         AND public.can_access_branch(po.branch_id)
     )
@@ -938,6 +1505,23 @@ CREATE POLICY "supplier_payments_update" ON supplier_payments
         AND (
           public.has_permission('payables', 'edit')
           OR public.has_permission('payables', 'manage')
+          OR public.has_permission('purchasing', 'edit')
+          OR public.has_permission('purchasing', 'manage')
+        )
+        AND public.can_access_branch(po.branch_id)
+    )
+  );
+
+CREATE POLICY "supplier_payments_delete" ON supplier_payments
+  FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1
+      FROM public.purchase_orders po
+      WHERE po.id = supplier_payments.po_id
+        AND (
+          public.has_permission('payables', 'manage')
+          OR public.has_permission('purchasing', 'manage')
         )
         AND public.can_access_branch(po.branch_id)
     )
@@ -1227,6 +1811,8 @@ WHERE schemaname = 'public'
     'roles', 'permissions', 'role_permissions',
     'branches', 'users', 'products', 'suppliers', 'customers',
     'inventory_stocks', 'sales', 'sale_items', 'sale_payments',
+    'quotations', 'quotation_items', 'sales_orders', 'sales_order_items',
+    'customer_product_pricing', 'product_bulk_pricing', 'stock_reservations', 'quotation_email_logs',
     'purchase_orders', 'supplier_payments', 'expenses',
     'receivables', 'receivable_payments', 'notifications',
     'audit_logs', 'cash_shifts', 'stock_movements', 'returns'

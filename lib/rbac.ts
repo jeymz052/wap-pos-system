@@ -16,11 +16,17 @@ export const ROUTE_PERMISSIONS: Record<string, Permission> = {
   "/inventory":   "inventory:view",
   "/catalog":     "inventory:view",
   "/purchasing":  "purchasing:view",
+  "/sales-orders":"sales_orders:view",
+  "/expenses":    "expenses:view",
   "/receivables": "receivables:view",
   "/payables":    "payables:view",
   "/customers":   "customers:view",
   "/suppliers":   "suppliers:view",
+  "/branches":    "branches:view",
   "/reports":     "reports:view",
+  "/notifications": "notifications:view",
+  "/subscription": "subscriptions:view",
+  "/audit-logs":  "audit_logs:view",
   "/users-roles": "users:view",
   "/settings":    "settings:view",
   // /security is accessible to all authenticated users — no special permission required
@@ -53,6 +59,9 @@ export interface UserProfile {
   role_id:    string | null;
   branch_id:  string | null;
   is_active:  boolean | null;
+  two_factor_enabled?: boolean | null;
+  require_password_change?: boolean | null;
+  password_expires_at?: string | null;
 }
 
 export interface RoleInfo {
