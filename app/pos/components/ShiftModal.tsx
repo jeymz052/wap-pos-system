@@ -388,64 +388,103 @@ export default function ShiftModal({
         </div>
 
         <div className="pos-modal__body">
-          <div className="pos-shift-info">
-            <div className="pos-shift-info__row"><span>Cashier</span><strong>{cashierName}</strong></div>
-            <div className="pos-shift-info__row">
-              <span>Status</span>
-              <span className={`pos-shift-badge ${shift ? "pos-shift-badge--open" : "pos-shift-badge--closed"}`}>
-                {shift?.status === "pending_approval" ? "Pending Approval" : shift ? "Shift Open" : "No Active Shift"}
-              </span>
+          <div className="pos-shift-hero">
+            <div className="pos-shift-hero__copy">
+              <span className="pos-shift-hero__eyebrow">Cash Drawer Control</span>
+              <h3>{shift ? "Manage the active shift" : "Open a new cashier shift"}</h3>
+              <p>
+                Keep drawer activity, opening cash, and closing variance in one clean workspace.
+              </p>
             </div>
-            {shift?.shift_number ? (
-              <div className="pos-shift-info__row"><span>Shift No.</span><strong>{shift.shift_number}</strong></div>
-            ) : null}
+            <div className="pos-shift-hero__stack">
+              <div className="pos-shift-hero__chip">
+                <span>Cashier</span>
+                <strong>{cashierName}</strong>
+              </div>
+              <div className="pos-shift-hero__chip">
+                <span>Status</span>
+                <strong className={`pos-shift-badge ${shift ? "pos-shift-badge--open" : "pos-shift-badge--closed"}`}>
+                  {shift?.status === "pending_approval" ? "Pending Approval" : shift ? "Shift Open" : "No Active Shift"}
+                </strong>
+              </div>
+              {shift?.shift_number ? (
+                <div className="pos-shift-hero__chip">
+                  <span>Shift No.</span>
+                  <strong>{shift.shift_number}</strong>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {loading ? <div className="pos-status">Loading shift details...</div> : null}
 
           {!shift ? (
-            <>
-              <label className="pos-pay-label" style={{ marginTop: 16 }}>
-                <DollarSign size={14} style={{ display: "inline", verticalAlign: "middle" }} /> Starting Cash in Drawer
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={startingCash}
-                  onChange={(event) => setStartingCash(event.target.value)}
-                  className="pos-pay-input"
-                  autoFocus
-                />
-              </label>
-              <label className="pos-pay-label">
-                Opening Notes (optional)
-                <textarea
-                  rows={2}
-                  value={notes}
-                  onChange={(event) => setNotes(event.target.value)}
-                  placeholder="Record opening drawer notes..."
-                  className="pos-pay-input"
-                />
-              </label>
-            </>
+            <div className="pos-shift-grid">
+              <section className="pos-shift-card">
+                <div className="pos-shift-card__head">
+                  <div className="pos-shift-card__icon"><DollarSign size={16} /></div>
+                  <div>
+                    <h4>Opening Cash</h4>
+                    <p>Enter the cash placed in the drawer before selling.</p>
+                  </div>
+                </div>
+                <label className="pos-pay-label">
+                  Starting Cash in Drawer
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={startingCash}
+                    onChange={(event) => setStartingCash(event.target.value)}
+                    className="pos-pay-input"
+                    autoFocus
+                  />
+                </label>
+              </section>
+
+              <section className="pos-shift-card">
+                <div className="pos-shift-card__head">
+                  <div className="pos-shift-card__icon pos-shift-card__icon--soft"><Clock size={16} /></div>
+                  <div>
+                    <h4>Opening Notes</h4>
+                    <p>Optional notes for drawer handoff or special instructions.</p>
+                  </div>
+                </div>
+                <label className="pos-pay-label">
+                  Notes
+                  <textarea
+                    rows={6}
+                    value={notes}
+                    onChange={(event) => setNotes(event.target.value)}
+                    placeholder="Record opening drawer notes..."
+                    className="pos-pay-input"
+                  />
+                </label>
+              </section>
+            </div>
           ) : (
             <>
-              <div className="pos-shift-summary">
-                {summaryRows.map((row) => (
+              <div className="pos-shift-summary pos-shift-summary--grid">
+                {summaryRows.map((row, index) => (
                   <div key={row.label} className="pos-shift-summary__row">
                     <span>{row.label}</span>
                     <strong>{row.value}</strong>
+                    {index === 0 ? <em>Shift baseline</em> : null}
                   </div>
                 ))}
               </div>
 
               {shift.status === "open" ? (
-                <>
-                  <div style={{ marginTop: 16, padding: 14, borderRadius: 12, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontWeight: 600 }}>
-                      <Wallet size={15} /> Cash In / Cash Out
+                <div className="pos-shift-grid">
+                  <section className="pos-shift-card">
+                    <div className="pos-shift-card__head">
+                      <div className="pos-shift-card__icon"><Wallet size={16} /></div>
+                      <div>
+                        <h4>Cash Movement</h4>
+                        <p>Record any cash in or cash out during the shift.</p>
+                      </div>
                     </div>
-                    <div style={{ display: "grid", gap: 10 }}>
+                    <div className="pos-shift-stack">
                       <select value={movementType} onChange={(event) => setMovementType(event.target.value as "cash_in" | "cash_out")} className="pos-pay-input">
                         <option value="cash_in">Cash In</option>
                         <option value="cash_out">Cash Out</option>
@@ -478,111 +517,138 @@ export default function ShiftModal({
                         <span>{processing ? "Saving..." : "Record Movement"}</span>
                       </button>
                     </div>
-                  </div>
+                  </section>
 
-                  <label className="pos-pay-label" style={{ marginTop: 16 }}>
-                    Actual Cash Count in Drawer
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={actualCash}
-                      onChange={(event) => setActualCash(event.target.value)}
-                      className="pos-pay-input"
-                    />
-                    <span style={{ fontSize: 11, color: "#64748b", marginTop: 4, display: "block" }}>
-                      Count all bills and coins before closing the shift.
-                    </span>
-                  </label>
+                  <section className="pos-shift-card pos-shift-card--accent">
+                    <div className="pos-shift-card__head">
+                      <div className="pos-shift-card__icon pos-shift-card__icon--soft"><CheckCircle2 size={16} /></div>
+                      <div>
+                        <h4>Closing Count</h4>
+                        <p>Use this when you are ready to balance and close the shift.</p>
+                      </div>
+                    </div>
+                    <label className="pos-pay-label">
+                      Actual Cash Count in Drawer
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={actualCash}
+                        onChange={(event) => setActualCash(event.target.value)}
+                        className="pos-pay-input"
+                      />
+                      <span className="pos-shift-hint">Count all bills and coins before closing the shift.</span>
+                    </label>
 
-                  <div className="pos-shift-diff-preview">
-                    <span>Projected Difference</span>
-                    <strong style={{ color: (parseFloat(actualCash) || 0) - shiftExpectedCash < 0 ? "#ef4444" : "#22c55e" }}>
-                      {fmt((parseFloat(actualCash) || 0) - shiftExpectedCash)}
-                    </strong>
-                  </div>
+                    <div className="pos-shift-diff-preview">
+                      <span>Projected Difference</span>
+                      <strong style={{ color: (parseFloat(actualCash) || 0) - shiftExpectedCash < 0 ? "#ef4444" : "#22c55e" }}>
+                        {fmt((parseFloat(actualCash) || 0) - shiftExpectedCash)}
+                      </strong>
+                    </div>
 
-                  <label className="pos-pay-label">
-                    Closing Notes
-                    <textarea
-                      rows={2}
-                      value={notes}
-                      onChange={(event) => setNotes(event.target.value)}
-                      placeholder="Explain overages, shortages, or drawer activity..."
-                      className="pos-pay-input"
-                    />
-                  </label>
-                </>
+                    <label className="pos-pay-label">
+                      Closing Notes
+                      <textarea
+                        rows={5}
+                        value={notes}
+                        onChange={(event) => setNotes(event.target.value)}
+                        placeholder="Explain overages, shortages, or drawer activity..."
+                        className="pos-pay-input"
+                      />
+                    </label>
+                  </section>
+
+                  <section className="pos-shift-card pos-shift-card--log">
+                    <div className="pos-shift-card__head">
+                      <div className="pos-shift-card__icon pos-shift-card__icon--soft"><AlertCircle size={16} /></div>
+                      <div>
+                        <h4>Cash Movement Log</h4>
+                        <p>Track every drawer adjustment for audit purposes.</p>
+                      </div>
+                    </div>
+                    <div className="pos-shift-log">
+                      {shiftPayload?.movements.length ? shiftPayload.movements.map((movement) => (
+                        <div key={movement.id} className="pos-shift-log__row">
+                          <div>
+                            <div className="pos-shift-log__title">{movement.type === "cash_in" ? "Cash In" : "Cash Out"}</div>
+                            <div className="pos-shift-log__meta">{movement.reason || "No reason"} · {formatDateTime(movement.created_at)}</div>
+                          </div>
+                          <strong className={movement.type === "cash_in" ? "pos-shift-log__amount pos-shift-log__amount--in" : "pos-shift-log__amount pos-shift-log__amount--out"}>
+                            {movement.type === "cash_in" ? "+" : "-"}{fmt(parseNumber(movement.amount))}
+                          </strong>
+                        </div>
+                      )) : (
+                        <div className="pos-empty-note">No cash movements recorded for this shift.</div>
+                      )}
+                    </div>
+                  </section>
+                </div>
               ) : (
-                <>
-                  <div className="pos-shift-summary" style={{ marginTop: 16 }}>
+                <div className="pos-shift-grid">
+                  <section className="pos-shift-card">
+                    <div className="pos-shift-card__head">
+                      <div className="pos-shift-card__icon"><Wallet size={16} /></div>
+                      <div>
+                        <h4>Shift Balance</h4>
+                        <p>Review the drawer count before marking the shift as closed.</p>
+                      </div>
+                    </div>
+                    <div className="pos-shift-summary">
                     <div className="pos-shift-summary__row"><span>Actual Cash</span><strong>{fmt(shiftActualCash)}</strong></div>
                     <div className={`pos-shift-summary__row pos-shift-summary__row--diff ${difference < 0 ? "pos-shift-summary__row--neg" : difference > 0 ? "pos-shift-summary__row--pos" : ""}`}>
                       <span>Difference</span>
                       <strong>{difference >= 0 ? "+" : ""}{fmt(difference)}</strong>
                     </div>
                     <div className="pos-shift-summary__row"><span>Closed At</span><strong>{formatDateTime(shift.closed_at)}</strong></div>
-                  </div>
+                    </div>
+                  </section>
 
-                  {requiresApproval ? (
-                    <div style={{ marginTop: 16, padding: 14, borderRadius: 12, background: "#fff7ed", border: "1px solid #fdba74" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontWeight: 600, color: "#9a3412" }}>
-                        <ShieldCheck size={15} /> Manager Approval Required
-                      </div>
-                      <p className="pos-shift-note pos-shift-note--warn" style={{ marginBottom: 10 }}>
-                        This shift has an over/short amount and must be approved by a manager before final close.
+                  <section className="pos-shift-card pos-shift-card--approval">
+                    {requiresApproval ? (
+                      <>
+                        <div className="pos-shift-card__head">
+                          <div className="pos-shift-card__icon pos-shift-card__icon--warn"><ShieldCheck size={16} /></div>
+                          <div>
+                            <h4>Manager Approval Required</h4>
+                            <p>This shift has an over/short amount and needs sign-off before closing.</p>
+                          </div>
+                        </div>
+                        <p className="pos-shift-note pos-shift-note--warn">
+                          Review the amount, then enter the approving manager credentials below.
+                        </p>
+                        <div className="pos-shift-stack">
+                          <input
+                            type="text"
+                            value={approverUsername}
+                            onChange={(event) => setApproverUsername(event.target.value)}
+                            placeholder="Manager username"
+                            className="pos-pay-input"
+                          />
+                          <input
+                            type="password"
+                            value={approverPin}
+                            onChange={(event) => setApproverPin(event.target.value)}
+                            placeholder="Manager PIN"
+                            className="pos-pay-input"
+                          />
+                          <textarea
+                            rows={4}
+                            value={approvalNotes}
+                            onChange={(event) => setApprovalNotes(event.target.value)}
+                            placeholder="Approval notes"
+                            className="pos-pay-input"
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <p className="pos-shift-note pos-shift-note--ok">
+                        <CheckCircle2 size={15} style={{ display: "inline", verticalAlign: "text-bottom" }} /> Shift balanced and closed.
                       </p>
-                      <input
-                        type="text"
-                        value={approverUsername}
-                        onChange={(event) => setApproverUsername(event.target.value)}
-                        placeholder="Manager username"
-                        className="pos-pay-input"
-                        style={{ marginBottom: 8 }}
-                      />
-                      <input
-                        type="password"
-                        value={approverPin}
-                        onChange={(event) => setApproverPin(event.target.value)}
-                        placeholder="Manager PIN"
-                        className="pos-pay-input"
-                        style={{ marginBottom: 8 }}
-                      />
-                      <textarea
-                        rows={2}
-                        value={approvalNotes}
-                        onChange={(event) => setApprovalNotes(event.target.value)}
-                        placeholder="Approval notes"
-                        className="pos-pay-input"
-                      />
-                    </div>
-                  ) : (
-                    <p className="pos-shift-note pos-shift-note--ok" style={{ marginTop: 16 }}>
-                      <CheckCircle2 size={15} style={{ display: "inline", verticalAlign: "text-bottom" }} /> Shift balanced and closed.
-                    </p>
-                  )}
-                </>
-              )}
-
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#475569", marginBottom: 8 }}>Cash Movement Log</div>
-                <div style={{ display: "grid", gap: 8, maxHeight: 170, overflowY: "auto" }}>
-                  {shiftPayload?.movements.length ? shiftPayload.movements.map((movement) => (
-                    <div key={movement.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderRadius: 10, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
-                      <div>
-                        <div style={{ fontWeight: 600 }}>{movement.type === "cash_in" ? "Cash In" : "Cash Out"}</div>
-                        <div style={{ fontSize: 12, color: "#64748b" }}>{movement.reason || "No reason"}</div>
-                        <div style={{ fontSize: 11, color: "#94a3b8" }}>{formatDateTime(movement.created_at)}</div>
-                      </div>
-                      <strong style={{ color: movement.type === "cash_in" ? "#16a34a" : "#dc2626" }}>
-                        {movement.type === "cash_in" ? "+" : "-"}{fmt(parseNumber(movement.amount))}
-                      </strong>
-                    </div>
-                  )) : (
-                    <div className="pos-empty-note">No cash movements recorded for this shift.</div>
-                  )}
+                    )}
+                  </section>
                 </div>
-              </div>
+              )}
             </>
           )}
 

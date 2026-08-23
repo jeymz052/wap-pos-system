@@ -184,7 +184,7 @@ export default function Sidebar() {
   );
 
   useEffect(() => {
-    document.documentElement.style.setProperty("--sidebar-width", "156px");
+    document.documentElement.style.setProperty("--sidebar-width", "198px");
   }, []);
 
   // Before mount, show all items (matches SSR output). After mount, apply RBAC filter.

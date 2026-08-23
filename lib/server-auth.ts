@@ -12,6 +12,11 @@ export type AuthenticatedUser = {
   authUserId: string;
   profileId: string;
   roleId: string | null;
+  roleName: string | null;
+  branchId: string | null;
+  dataAccessScope: string;
+  isActive: boolean;
+  allowLogin: boolean;
   permissions: Set<string>;
 };
 
@@ -35,6 +40,11 @@ export async function getAuthenticatedUser(request: NextRequest): Promise<Authen
     authUserId: authData.user.id,
     profileId: accessProfile.profileId,
     roleId: accessProfile.roleId,
+    roleName: accessProfile.roleName,
+    branchId: accessProfile.branchId,
+    dataAccessScope: accessProfile.dataAccessScope,
+    isActive: accessProfile.isActive,
+    allowLogin: accessProfile.allowLogin,
     permissions: new Set(accessProfile.permissions),
   };
 }

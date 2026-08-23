@@ -7,7 +7,6 @@ import {
   CreditCard,
   FileSpreadsheet,
   LoaderCircle,
-  MapPin,
   Plus,
   Printer,
   ReceiptText,
@@ -415,7 +414,9 @@ export default function CustomerManagementClient() {
 
       const profile = (profileResult.data as { branch_id?: string | null } | null) ?? null;
       const branchRows = (branchesResult.data ?? []) as BranchRow[];
+      const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
       const defaultBranch =
+        branchRows.find((branch) => branch.id === savedBranchId) ??
         branchRows.find((branch) => branch.id === profile?.branch_id) ??
         branchRows.find((branch) => branch.is_main) ??
         branchRows[0];
@@ -430,6 +431,23 @@ export default function CustomerManagementClient() {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id) {
+        setSelectedBranchId(detail.id);
+      }
+    };
+
+    const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
+    if (savedBranchId) {
+      setSelectedBranchId((current) => current || savedBranchId);
+    }
+
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
   }, []);
 
   useEffect(() => {
@@ -1044,15 +1062,6 @@ export default function CustomerManagementClient() {
             <option key={option.value} value={option.value}>{option.label}</option>
           ))}
         </select>
-
-        <label className="customer-mgmt__branch">
-          <MapPin size={14} />
-          <select value={selectedBranchId} onChange={(event) => setSelectedBranchId(event.target.value)}>
-            {branches.map((branch) => (
-              <option key={branch.id} value={branch.id}>{branch.name}</option>
-            ))}
-          </select>
-        </label>
 
         <button type="button" className="customer-mgmt__button customer-mgmt__button--primary" onClick={() => openCustomerModal("create")}>
           <Plus size={15} />

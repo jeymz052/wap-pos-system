@@ -12,7 +12,6 @@ import {
   Gauge,
   Layers3,
   LoaderCircle,
-  MapPin,
   Minus,
   PackageSearch,
   Play,
@@ -27,6 +26,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { fetchBranchOptions } from "@/lib/branch-options";
 import { resolveCurrentUserInfo } from "@/lib/current-user";
 import PaymentModal, { type PaymentLine, type PaymentSuccessPayload } from "./components/PaymentModal";
 import ReceiptModal from "./components/ReceiptModal";
@@ -77,31 +77,34 @@ type CompatibilityModelRow = {
   year_to?: number | null;
 };
 
-type InventorySourceRow = {
+type ProductSourceRow = {
   id: string;
-  quantity: number;
-  product?: {
+  name: string;
+  sku: string;
+  barcode?: string | null;
+  part_number?: string | null;
+  supplier_code?: string | null;
+  shelf_location?: string | null;
+  selling_price?: string | number | null;
+  status?: string | null;
+  is_active?: boolean | null;
+  category?: Array<{
     id: string;
     name: string;
-    sku: string;
-    barcode?: string | null;
-    part_number?: string | null;
-    supplier_code?: string | null;
-    shelf_location?: string | null;
-    selling_price?: string | number | null;
-    category?: {
-      id: string;
-      name: string;
-    } | null;
-    brand?: {
-      id: string;
-      name: string;
-    } | null;
-    product_images?: ProductImageRow[] | null;
-    product_compatibility?: Array<{
-      motorcycle_model?: CompatibilityModelRow | null;
-    }> | null;
-  } | null;
+  }> | null;
+  brand?: Array<{
+    id: string;
+    name: string;
+  }> | null;
+  product_images?: ProductImageRow[] | null;
+  product_compatibility?: Array<{
+    motorcycle_model?: CompatibilityModelRow | CompatibilityModelRow[] | null;
+  }> | null;
+};
+
+type InventoryStockRow = {
+  product_id: string;
+  quantity: number;
 };
 
 type ProductCard = {
@@ -268,6 +271,7 @@ const paymentMethodMeta: Record<string, { label: string; className: string; icon
 };
 
 const paymentMethodOrder = ["cash", "gcash", "card", "bank_transfer", "customer_credit", "split"];
+const LOAD_TIMEOUT_MS = 20000;
 
 function parseNumber(value: unknown) {
   if (typeof value === "number") return value;
@@ -308,19 +312,25 @@ function getPrimaryImage(images?: ProductImageRow[] | null) {
   return sorted[0]?.url ?? "";
 }
 
-function formatCompatibilityList(list?: Array<{ motorcycle_model?: CompatibilityModelRow | null }> | null) {
+function formatCompatibilityList(list?: Array<{ motorcycle_model?: CompatibilityModelRow | CompatibilityModelRow[] | null }> | null) {
   if (!list?.length) return [];
 
   return list
-    .map((entry) => {
-      const model = entry.motorcycle_model;
-      if (!model) return "";
+    .flatMap((entry) => {
+      const models = Array.isArray(entry.motorcycle_model)
+        ? entry.motorcycle_model
+        : entry.motorcycle_model
+          ? [entry.motorcycle_model]
+          : [];
+
+      return models.map((model) => {
       const yearRange =
         model.year_from || model.year_to
           ? ` ${model.year_from ?? ""}${model.year_to ? `-${model.year_to}` : ""}`.trimEnd()
           : "";
       const engineType = model.engine_type ? ` ${model.engine_type}` : "";
       return `${model.brand} ${model.model_name}${engineType}${yearRange}`.trim();
+      });
     })
     .filter(Boolean);
 }
@@ -361,6 +371,17 @@ function getCartLineTotal(item: CartItem) {
   return getCartNetUnitPrice(item) * item.quantity;
 }
 
+function withTimeout<T>(promise: Promise<T>, message: string, timeoutMs = LOAD_TIMEOUT_MS) {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) clearTimeout(timeoutId);
+  }) as Promise<T>;
+}
+
 async function getAuthHeaders(): Promise<Record<string, string>> {
   const { data } = await supabase.auth.getSession();
   const accessToken = data.session?.access_token;
@@ -391,6 +412,7 @@ export default function POSPage() {
   const [selectedMotorcycleFilter, setSelectedMotorcycleFilter] = useState("all");
   const [selectedEngineFilter, setSelectedEngineFilter] = useState("all");
   const [selectedYearFilter, setSelectedYearFilter] = useState("");
+  const [currentProductPage, setCurrentProductPage] = useState(1);
   const [recentTransactions, setRecentTransactions] = useState<RecentTransactionRow[]>([]);
   const [recentItems, setRecentItems] = useState<Array<{ sku: string; name: string; price: number; icon: LucideIcon; tint: string }>>([]);
   const [summaryCards, setSummaryCards] = useState<SummaryCard[]>([
@@ -427,76 +449,86 @@ export default function POSPage() {
   const deferredSearchValue = useDeferredValue(searchValue);
 
   useEffect(() => {
+    setCurrentProductPage(1);
+  }, [selectedBranchId, searchValue, selectedCategoryId, selectedBrandFilter, selectedMotorcycleFilter, selectedEngineFilter, selectedYearFilter]);
+
+  useEffect(() => {
     let isMounted = true;
 
     const loadProfileAndBranches = async () => {
       setLoading(true);
       setError("");
 
-      const {
-        data: { user: authUser },
-        error: authError,
-      } = await supabase.auth.getUser();
+      try {
+        const {
+          data: { user: authUser },
+          error: authError,
+        } = await supabase.auth.getUser();
 
-      if (authError) {
+        if (authError) {
+          if (isMounted) setError(authError.message);
+          return;
+        }
+
+        if (!authUser) {
+          if (isMounted) setError("Please sign in to manage POS.");
+          return;
+        }
+
+        const [profileResult] = await withTimeout(
+          Promise.all([
+            authUser?.id
+              ? supabase
+                  .from("users")
+                  .select("id, first_name, last_name, username, email, role_id, branch_id")
+                  .eq("auth_id", authUser.id)
+                  .maybeSingle()
+              : Promise.resolve({ data: null, error: null }),
+          ]),
+          "Loading POS branches timed out."
+        );
+
+        if (!isMounted) return;
+
+        if (profileResult.error) {
+          setError(profileResult.error.message);
+        }
+
+        const profileUser = (profileResult.data as UserRow | null) ?? null;
+        const token = (await supabase.auth.getSession()).data.session?.access_token ?? "";
+        const branches = token ? ((await fetchBranchOptions(token)) as BranchOption[]) : [];
+        const roleResult = profileUser?.role_id
+          ? await supabase.from("roles").select("name").eq("id", profileUser.role_id).maybeSingle()
+          : { data: null };
+
+        if (!isMounted) return;
+
+        const resolvedUser = resolveCurrentUserInfo({
+          authUser,
+          profileUser,
+          roleName: (roleResult.data as RoleRow | null)?.name ?? null,
+        });
+
+        setCashierName(resolvedUser.displayName || resolvedUser.username);
+        setCashierUserId(profileUser?.id ?? "");
+        setBranchOptions(branches);
+
+        const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
+        const defaultBranch = branches.find((branch) => branch.id === savedBranchId)
+          ?? branches.find((branch) => branch.id === profileUser?.branch_id)
+          ?? branches.find((branch) => branch.is_main)
+          ?? branches[0];
+
+        setSelectedBranchId(defaultBranch?.id ?? "");
+      } catch (err) {
         if (isMounted) {
-          setError(authError.message);
+          setError(err instanceof Error ? err.message : "Unable to load POS branches.");
+        }
+      } finally {
+        if (isMounted) {
           setLoading(false);
         }
-        return;
       }
-
-      const [profileResult, branchResult] = await Promise.all([
-        authUser?.id
-          ? supabase
-              .from("users")
-              .select("id, first_name, last_name, username, email, role_id, branch_id")
-              .eq("auth_id", authUser.id)
-              .maybeSingle()
-          : Promise.resolve({ data: null, error: null }),
-        supabase
-          .from("branches")
-          .select("id, name, is_main")
-          .eq("is_active", true)
-          .order("is_main", { ascending: false })
-          .order("name", { ascending: true }),
-      ]);
-
-      if (!isMounted) return;
-
-      if (profileResult.error) {
-        setError(profileResult.error.message);
-      }
-
-      if (branchResult.error) {
-        setError(branchResult.error.message);
-        setLoading(false);
-        return;
-      }
-
-      const profileUser = (profileResult.data as UserRow | null) ?? null;
-      const branches = (branchResult.data ?? []) as BranchOption[];
-      const roleResult = profileUser?.role_id
-        ? await supabase.from("roles").select("name").eq("id", profileUser.role_id).maybeSingle()
-        : { data: null };
-
-      if (!isMounted) return;
-
-      const resolvedUser = resolveCurrentUserInfo({
-        authUser,
-        profileUser,
-        roleName: (roleResult.data as RoleRow | null)?.name ?? null,
-      });
-
-      setCashierName(resolvedUser.displayName || resolvedUser.username);
-      setCashierUserId(profileUser?.id ?? "");
-      setBranchOptions(branches);
-
-      const defaultBranch = branches.find((branch) => branch.id === profileUser?.branch_id)
-        ?? branches.find((branch) => branch.is_main)
-        ?? branches[0];
-
-      setSelectedBranchId(defaultBranch?.id ?? "");
     };
 
     void loadProfileAndBranches();
@@ -515,58 +547,36 @@ export default function POSPage() {
       setLoading(true);
       setError("");
 
-      const monthStart = new Date();
-      monthStart.setDate(1);
-      monthStart.setHours(0, 0, 0, 0);
+      try {
+        const monthStart = new Date();
+        monthStart.setDate(1);
+        monthStart.setHours(0, 0, 0, 0);
 
-      const [categoryResult, customerResult, inventoryResult, branchPricingResult, salesResult, heldSalesResult, shiftResult, settingsResult] = await Promise.all([
-        supabase.from("categories").select("id, name").eq("is_active", true).order("sort_order", { ascending: true }),
-        supabase
-          .from("customers")
-          .select("id, name, branch_id, customer_type, email, phone, credit_limit, current_balance, allow_credit, default_credit_terms_days")
-          .eq("is_active", true)
-          .order("name", { ascending: true }),
-        supabase
-          .from("inventory_stocks")
-          .select(`
-            id,
-            quantity,
-            product:products (
-              id,
-              name,
-              sku,
-              barcode,
-              part_number,
-              supplier_code,
-              shelf_location,
-              selling_price,
-              category:categories (
-                id,
-                name
-              ),
-              brand:brands (
-                id,
-                name
-              ),
-              product_images (
-                url,
-                is_primary,
-                sort_order
-              ),
-              product_compatibility (
-                motorcycle_model:motorcycle_models (
-                  id,
-                  brand,
-                  model_name,
-                  engine_type,
-                  year_from,
-                  year_to
-                )
-              )
-            )
-          `)
-          .eq("branch_id", selectedBranchId)
-          .order("updated_at", { ascending: false }),
+        const authHeaders = await getAuthHeaders();
+        const productCatalogPromise = fetch(`/api/inventory/products?branchId=${encodeURIComponent(selectedBranchId)}`, {
+          headers: authHeaders,
+        }).then(async (response) => {
+          const payload = await response.json() as {
+            stockRows?: InventoryStockRow[];
+            productRows?: ProductSourceRow[];
+            error?: string;
+          };
+
+          if (!response.ok) {
+            throw new Error(payload.error || "Unable to load products.");
+          }
+
+          return payload;
+        });
+
+        const [categoryResult, customerResult, catalogResult, branchPricingResult, salesResult, heldSalesResult, shiftResult, settingsResult] = await withTimeout(Promise.all([
+          supabase.from("categories").select("id, name").eq("is_active", true).order("sort_order", { ascending: true }),
+          supabase
+            .from("customers")
+            .select("id, name, branch_id, customer_type, email, phone, credit_limit, current_balance, allow_credit, default_credit_terms_days")
+            .eq("is_active", true)
+            .order("name", { ascending: true }),
+          productCatalogPromise,
         supabase
           .from("branch_product_prices")
           .select("product_id, price, is_active")
@@ -608,31 +618,31 @@ export default function POSPage() {
             "shop_phone",
             "shop_tax_id",
           ]),
-      ]);
+        ]), "Loading POS data timed out.");
 
-      if (!isMounted) return;
+        if (!isMounted) return;
 
-      if (categoryResult.error || customerResult.error || inventoryResult.error || branchPricingResult.error || salesResult.error || heldSalesResult.error || shiftResult.error || settingsResult.error) {
-        setError(
-          categoryResult.error?.message
-          || customerResult.error?.message
-          || inventoryResult.error?.message
-          || branchPricingResult.error?.message
-          || salesResult.error?.message
-          || heldSalesResult.error?.message
-          || shiftResult.error?.message
-          || settingsResult.error?.message
-          || "Unable to load POS data."
-        );
-        setLoading(false);
-        return;
-      }
+        if (categoryResult.error || customerResult.error || branchPricingResult.error || salesResult.error || heldSalesResult.error || shiftResult.error || settingsResult.error) {
+          setError(
+            categoryResult.error?.message
+            || customerResult.error?.message
+            || branchPricingResult.error?.message
+            || salesResult.error?.message
+            || heldSalesResult.error?.message
+            || shiftResult.error?.message
+            || settingsResult.error?.message
+            || "Unable to load POS data."
+          );
+          return;
+        }
 
       const categoryRows = (categoryResult.data ?? []) as CategoryOption[];
       const customerRows = ((customerResult.data ?? []) as CustomerOption[]).filter(
         (customer) => !customer.branch_id || customer.branch_id === selectedBranchId
       );
-      const inventoryRows = (inventoryResult.data ?? []) as unknown as InventorySourceRow[];
+      const stockRows = (catalogResult.stockRows ?? []) as InventoryStockRow[];
+      const productRows = (catalogResult.productRows ?? []) as ProductSourceRow[];
+      const stockMap = new Map(stockRows.map((row) => [row.product_id, parseNumber(row.quantity)]));
       const branchPriceMap = new Map(
         ((branchPricingResult.data ?? []) as Array<{ product_id: string; price: string | number | null }>).map((row) => [
           row.product_id,
@@ -641,15 +651,16 @@ export default function POSPage() {
       );
       const salesRows = (salesResult.data ?? []) as SaleRow[];
 
-      const normalizedProducts = inventoryRows
-        .filter((row) => row.product)
-        .map((row, index) => {
-          const product = row.product!;
+      const normalizedProducts = productRows
+        .filter((product) => product.is_active !== false && String(product.status ?? "active").toLowerCase() !== "inactive")
+        .map((product, index) => {
           const visual = getProductVisual(index);
           const compatibleLabels = formatCompatibilityList(product.product_compatibility);
           const compatibilityModels = (product.product_compatibility ?? [])
             .map((entry) => entry.motorcycle_model)
             .filter(Boolean) as CompatibilityModelRow[];
+          const category = Array.isArray(product.category) ? product.category[0] : product.category;
+          const brand = Array.isArray(product.brand) ? product.brand[0] : product.brand;
 
           return {
             id: product.id,
@@ -660,10 +671,10 @@ export default function POSPage() {
             supplierCode: product.supplier_code ?? "",
             shelfLocation: product.shelf_location ?? "",
             price: branchPriceMap.get(product.id) ?? parseNumber(product.selling_price),
-            stock: row.quantity,
-            categoryId: product.category?.id ?? "",
-            categoryName: product.category?.name ?? "Others",
-            brandName: product.brand?.name ?? "",
+            stock: stockMap.get(product.id) ?? 0,
+            categoryId: category?.id ?? "",
+            categoryName: category?.name ?? "Others",
+            brandName: brand?.name ?? "",
             imageUrl: getPrimaryImage(product.product_images),
             compatibleLabels,
             motorcycleModels: compatibilityModels.map((model) => `${model.brand} ${model.model_name}`.trim()),
@@ -680,40 +691,39 @@ export default function POSPage() {
       const customerIds = Array.from(new Set(salesRows.map((sale) => sale.customer_id).filter(Boolean))) as string[];
       const cashierIds = Array.from(new Set(salesRows.map((sale) => sale.cashier_id).filter(Boolean)));
 
-      const [paymentResult, saleItemResult, transactionCustomerResult, cashierResult, monthlySalesResult] = await Promise.all([
-        saleIds.length
-          ? supabase.from("sale_payments").select("sale_id, payment_method, amount").in("sale_id", saleIds)
-          : Promise.resolve({ data: [], error: null }),
-        saleIds.length
-          ? supabase.from("sale_items").select("sale_id, product_id, quantity, unit_price, total_price").in("sale_id", saleIds)
-          : Promise.resolve({ data: [], error: null }),
-        customerIds.length
-          ? supabase.from("customers").select("id, name").in("id", customerIds)
-          : Promise.resolve({ data: [], error: null }),
-        cashierIds.length
-          ? supabase.from("users").select("id, first_name, last_name, username, email").in("id", cashierIds)
-          : Promise.resolve({ data: [], error: null }),
-        supabase
-          .from("v_daily_sales_summary")
-          .select("total_transactions, gross_sales")
-          .eq("branch_id", selectedBranchId)
-          .gte("sale_date", monthStart.toISOString().slice(0, 10)),
-      ]);
+        const [paymentResult, saleItemResult, transactionCustomerResult, cashierResult, monthlySalesResult] = await withTimeout(Promise.all([
+          saleIds.length
+            ? supabase.from("sale_payments").select("sale_id, payment_method, amount").in("sale_id", saleIds)
+            : Promise.resolve({ data: [], error: null }),
+          saleIds.length
+            ? supabase.from("sale_items").select("sale_id, product_id, quantity, unit_price, total_price").in("sale_id", saleIds)
+            : Promise.resolve({ data: [], error: null }),
+          customerIds.length
+            ? supabase.from("customers").select("id, name").in("id", customerIds)
+            : Promise.resolve({ data: [], error: null }),
+          cashierIds.length
+            ? supabase.from("users").select("id, first_name, last_name, username, email").in("id", cashierIds)
+            : Promise.resolve({ data: [], error: null }),
+          supabase
+            .from("v_daily_sales_summary")
+            .select("total_transactions, gross_sales")
+            .eq("branch_id", selectedBranchId)
+            .gte("sale_date", monthStart.toISOString().slice(0, 10)),
+        ]), "Loading POS transactions timed out.");
 
-      if (!isMounted) return;
+        if (!isMounted) return;
 
-      if (paymentResult.error || saleItemResult.error || transactionCustomerResult.error || cashierResult.error || monthlySalesResult.error) {
-        setError(
-          paymentResult.error?.message
-          || saleItemResult.error?.message
-          || transactionCustomerResult.error?.message
-          || cashierResult.error?.message
-          || monthlySalesResult.error?.message
-          || "Unable to finish loading POS details."
-        );
-        setLoading(false);
-        return;
-      }
+        if (paymentResult.error || saleItemResult.error || transactionCustomerResult.error || cashierResult.error || monthlySalesResult.error) {
+          setError(
+            paymentResult.error?.message
+            || saleItemResult.error?.message
+            || transactionCustomerResult.error?.message
+            || cashierResult.error?.message
+            || monthlySalesResult.error?.message
+            || "Unable to finish loading POS details."
+          );
+          return;
+        }
 
       const paymentRows = (paymentResult.data ?? []) as SalePaymentRow[];
       const saleItemRows = (saleItemResult.data ?? []) as SaleItemRow[];
@@ -796,10 +806,18 @@ export default function POSPage() {
       setCurrentShiftStatus(activeShift?.status ?? null);
       setCurrentShiftId(activeShift?.status === "open" ? activeShift.id : null);
       setExpectedCash(parseNumber(activeShift?.expected_cash));
-      setLoading(false);
+        setLoading(false);
 
-      if (!(shiftResult.data ?? []).length) {
-        setSalesNote((current) => current || "No open cash shift found for this cashier.");
+        if (!(shiftResult.data ?? []).length) {
+          setSalesNote((current) => current || "No open cash shift found for this cashier.");
+        }
+      } catch (err) {
+        if (!isMounted) return;
+        setError(err instanceof Error ? err.message : "Unable to load POS data.");
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
       }
     };
 
@@ -809,6 +827,18 @@ export default function POSPage() {
       isMounted = false;
     };
   }, [selectedBranchId, cashierUserId, cashierName, refreshToken]);
+
+  useEffect(() => {
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id) {
+        setSelectedBranchId(detail.id);
+      }
+    };
+
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
+  }, []);
 
   const categoryTabs = [
     { id: "all", name: "All Items" },
@@ -861,6 +891,19 @@ export default function POSPage() {
       .toLowerCase()
       .includes(normalizedQuery);
   });
+  const productsPerPage = 10;
+  const totalProductPages = Math.max(1, Math.ceil(filteredProducts.length / productsPerPage));
+  const safeProductPage = Math.min(currentProductPage, totalProductPages);
+  const paginatedProducts = filteredProducts.slice(
+    (safeProductPage - 1) * productsPerPage,
+    safeProductPage * productsPerPage
+  );
+
+  useEffect(() => {
+    if (safeProductPage !== currentProductPage) {
+      setCurrentProductPage(safeProductPage);
+    }
+  }, [currentProductPage, safeProductPage]);
 
   const subtotal = cartItems.reduce((sum, item) => sum + getCartLineTotal(item), 0);
   const discountAmount = canApplyDiscount ? Math.min(parseNumber(discountValue), subtotal) : 0;
@@ -869,6 +912,7 @@ export default function POSPage() {
   const total = taxableBase + tax;
 
   const selectedBranch = branchOptions.find((branch) => branch.id === selectedBranchId);
+  const branchSelectValue = selectedBranchId || selectedBranch?.id || "";
   const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId);
   const selectedCustomerCredit = selectedCustomer
     ? {
@@ -883,6 +927,32 @@ export default function POSPage() {
       }
     : null;
   const editingCartItem = cartItems.find((item) => item.id === editingCartItemId) ?? null;
+
+  const handleBranchSelection = (branchId: string) => {
+    setSelectedBranchId(branchId);
+    setCurrentProductPage(1);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("active_branch_id", branchId);
+      window.dispatchEvent(new CustomEvent("branch-changed", { detail: { id: branchId } }));
+    }
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "F9") return;
+      event.preventDefault();
+      if (!currentShiftId) {
+        setShowShiftModal(true);
+        return;
+      }
+      if (cartItems.length) {
+        setShowPaymentModal(true);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cartItems.length, currentShiftId]);
 
   const addToCart = (product: ProductCard) => {
     setCartItems((current) => {
@@ -1147,16 +1217,16 @@ export default function POSPage() {
             </div>
 
             <div className="pos-header__actions">
-              <label className="pos-chip pos-chip--select">
-                <MapPin size={14} />
-                <select value={selectedBranchId} onChange={(event) => setSelectedBranchId(event.target.value)}>
+              <div className="pos-chip pos-chip--select">
+                <span>Branch</span>
+                <select value={branchSelectValue} onChange={(event) => handleBranchSelection(event.target.value)}>
                   {branchOptions.map((branch) => (
                     <option key={branch.id} value={branch.id}>
                       {branch.name}
                     </option>
                   ))}
                 </select>
-              </label>
+              </div>
               <div className="pos-chip">
                 <User size={14} />
                 <span>Cashier: {cashierName}</span>
@@ -1165,19 +1235,9 @@ export default function POSPage() {
                 <Play size={14} />
                 <span>Hold Sales ({heldSalesCount})</span>
               </button>
-              <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowShiftModal(true)}>
+              <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowRecallModal(true)}>
                 <Wallet size={14} />
-                <span>
-                  {currentShiftStatus === "pending_approval" ? "Approve Shift" : currentShiftId ? "Shift Open" : "Open Shift"}
-                </span>
-              </button>
-              <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowVoidModal(true)}>
-                <Trash2 size={14} />
-                <span>Void Sale</span>
-              </button>
-              <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowReturnModal(true)}>
-                <TicketPercent size={14} />
-                <span>Returns</span>
+                <span>Park Sales</span>
               </button>
             </div>
           </header>
@@ -1267,6 +1327,23 @@ export default function POSPage() {
 
           {error ? <div className="pos-status pos-status--error">{error}</div> : null}
 
+          <div className="pos-quick-actions">
+            <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowShiftModal(true)}>
+              <Wallet size={14} />
+              <span>
+                {currentShiftStatus === "pending_approval" ? "Approve Shift" : currentShiftId ? "Shift Open" : "Open Shift"}
+              </span>
+            </button>
+            <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowVoidModal(true)}>
+              <Trash2 size={14} />
+              <span>Void Sales</span>
+            </button>
+            <button type="button" className="pos-btn pos-btn--ghost" onClick={() => setShowReturnModal(true)}>
+              <TicketPercent size={14} />
+              <span>Returns</span>
+            </button>
+          </div>
+
           <div className="pos-content">
             <div className="pos-left">
               {loading ? (
@@ -1277,7 +1354,7 @@ export default function POSPage() {
               ) : (
                 <>
                   <div className="pos-product-grid">
-                    {filteredProducts.map((product) => (
+                    {paginatedProducts.map((product) => (
                       <article key={product.id} className="pos-product-card" onClick={() => addToCart(product)} role="button" tabIndex={0}>
                         <div className="pos-product-card__media" style={{ background: product.tint }}>
                           {product.imageUrl ? (
@@ -1299,8 +1376,63 @@ export default function POSPage() {
                     ))}
                   </div>
 
+                  {filteredProducts.length ? (
+                    <div className="pos-pagination" aria-label="Product pagination">
+                      <button
+                        type="button"
+                        className="pos-pagination__item pos-pagination__item--arrow"
+                        disabled={safeProductPage === 1}
+                        onClick={() => setCurrentProductPage((current) => Math.max(1, current - 1))}
+                        aria-label="Previous page"
+                      >
+                        ←
+                      </button>
+                      {Array.from({ length: totalProductPages }, (_, index) => index + 1)
+                        .filter((pageNumber) =>
+                          pageNumber === 1
+                          || pageNumber === totalProductPages
+                          || Math.abs(pageNumber - safeProductPage) <= 2
+                        )
+                        .reduce<Array<number | "...">>((acc, pageNumber, index, source) => {
+                          const previous = source[index - 1];
+                          if (index > 0 && typeof previous === "number" && pageNumber - previous > 1) {
+                            acc.push("...");
+                          }
+                          acc.push(pageNumber);
+                          return acc;
+                        }, [])
+                        .map((pageNumber, index) => (
+                          pageNumber === "..."
+                            ? <span key={`ellipsis-${index}`} className="pos-pagination__more">…</span>
+                            : (
+                              <button
+                                key={pageNumber}
+                                type="button"
+                                className={`pos-pagination__item pos-pagination__page ${safeProductPage === pageNumber ? "pos-pagination__item--active" : ""}`}
+                                onClick={() => setCurrentProductPage(pageNumber)}
+                              >
+                                {pageNumber}
+                              </button>
+                            )
+                        ))}
+                      <button
+                        type="button"
+                        className="pos-pagination__item pos-pagination__item--arrow"
+                        disabled={safeProductPage === totalProductPages}
+                        onClick={() => setCurrentProductPage((current) => Math.min(totalProductPages, current + 1))}
+                        aria-label="Next page"
+                      >
+                        →
+                      </button>
+                    </div>
+                  ) : null}
+
                   {!filteredProducts.length ? (
-                    <div className="pos-status">No products matched this search for the selected branch.</div>
+                    <div className="pos-status">
+                      {products.length
+                        ? "No products matched your current search or filters."
+                        : "No active products are available for this branch yet."}
+                    </div>
                   ) : null}
                 </>
               )}

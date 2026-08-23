@@ -6,6 +6,7 @@ import { Bell, Building2, CalendarDays, Check, ChevronDown, LogOut, MapPin, Sear
 import { supabase } from "@/lib/supabase";
 import { resolveCurrentUserInfo } from "@/lib/current-user";
 import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
+import { fetchBranchOptions } from "@/lib/branch-options";
 
 interface TopBarProps { title: string; subtitle?: string; searchPlaceholder?: string; }
 interface Branch { id: string; name: string; is_main?: boolean; }
@@ -129,8 +130,9 @@ export default function TopBar({ title, subtitle, searchPlaceholder = "Search...
       if (!mounted) return;
       setUserInfo({ ...resolved, userId: profileUser?.id ?? "" });
 
-      // Branches
-      const { data: blist } = await supabase.from("branches").select("id,name,is_main").eq("is_active", true).order("name");
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token ?? "";
+      const blist = token ? await fetchBranchOptions(token) : [];
       if (!mounted) return;
       const branches = (blist ?? []) as Branch[];
       setBranches(branches);

@@ -54,7 +54,13 @@ type SendPayload = {
   sentBy?: string | null;
 };
 
-type RequestPayload = CreateDocumentPayload | ReservePayload | ConvertPayload | SendPayload;
+type ApprovePayload = {
+  action: "approve_quotation";
+  quotationId?: string;
+  approverId?: string | null;
+};
+
+type RequestPayload = CreateDocumentPayload | ReservePayload | ConvertPayload | SendPayload | ApprovePayload;
 
 type QuoteRow = {
   id: string;
@@ -488,6 +494,10 @@ async function convertQuotationToSale(payload: ConvertPayload) {
     throw new Error("This quotation has already been converted.");
   }
 
+  if (quote.status !== "approved") {
+    throw new Error("Only approved quotations can be converted to a sale.");
+  }
+
   const paymentMethod = payload.paymentMethod ?? "cash";
   const supportedPaymentMethods = ["cash", "card", "bank_transfer", "gcash", "ewallet", "customer_credit"];
   if (!supportedPaymentMethods.includes(paymentMethod)) {
@@ -888,6 +898,50 @@ export async function POST(request: NextRequest) {
         saleId: sale.id,
         invoiceNumber: sale.invoice_number,
         message: "Quotation converted to sale successfully.",
+      });
+    }
+
+    if (body.action === "approve_quotation") {
+      if (!hasAnyPermission(user, "sales_orders:approve", "sales_orders:manage")) {
+        return NextResponse.json({ error: "You do not have permission to approve quotations." }, { status: 403 });
+      }
+      if (!body.quotationId) {
+        return NextResponse.json({ error: "Quotation is required." }, { status: 400 });
+      }
+
+      const quoteResult = await supabaseAdmin
+        .from("quotations")
+        .select("branch_id, status, converted_to_sale_id")
+        .eq("id", body.quotationId)
+        .maybeSingle();
+
+      if (quoteResult.error) throw quoteResult.error;
+      const quoteBranchId = (quoteResult.data as { branch_id?: string | null } | null)?.branch_id ?? null;
+      if (!canAccessBranch(actor, quoteBranchId)) {
+        return NextResponse.json({ error: "You do not have access to that branch." }, { status: 403 });
+      }
+
+      const quoteStatus = String((quoteResult.data as { status?: string | null } | null)?.status ?? "");
+      if (quoteStatus === "converted") {
+        return NextResponse.json({ error: "Converted quotations cannot be approved." }, { status: 400 });
+      }
+
+      const approveResult = await supabaseAdmin
+        .from("quotations")
+        .update({
+          status: "approved",
+          approved_by: user.profileId,
+          approved_at: new Date().toISOString(),
+        })
+        .eq("id", body.quotationId)
+        .select("id")
+        .maybeSingle();
+
+      if (approveResult.error) throw approveResult.error;
+
+      return NextResponse.json({
+        success: true,
+        message: "Quotation approved successfully.",
       });
     }
 

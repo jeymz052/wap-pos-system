@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  ArrowLeftRight,
   Barcode,
   Box,
   Boxes,
@@ -26,6 +27,7 @@ import {
 import { Cell, Pie, PieChart, ResponsiveContainer } from "recharts";
 import BarcodeStudioModal from "@/components/barcodes/BarcodeStudioModal";
 import { supabase } from "@/lib/supabase";
+import { fetchBranchOptions } from "@/lib/branch-options";
 import { useRbac } from "@/components/RbacProvider";
 import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
 import { formatPlanName } from "@/lib/subscription-config";
@@ -197,7 +199,21 @@ type InventorySnapshot = {
 
 type StatusFilter = "all" | "in_stock" | "low_stock" | "out_of_stock" | "inactive";
 type DialogMode = "create" | "edit";
-type ProductTab = "basic" | "pricing" | "stock" | "variants" | "compatibility" | "images" | "history";
+type ProductStep = "identity" | "pricingStock" | "variantsFitment" | "mediaHistory";
+type InventoryQuickAction = "adjust" | "transfer" | "audit";
+type QuickActionReason = "adjustment" | "damage" | "return_in" | "return_out";
+
+type QuickActionFormState = {
+  adjustMode: "delta" | "set";
+  adjustReason: QuickActionReason;
+  adjustQuantity: string;
+  adjustNotes: string;
+  transferBranchId: string;
+  transferQuantity: string;
+  transferNotes: string;
+  auditCountedQuantity: string;
+  auditNotes: string;
+};
 
 type ProductVariantForm = {
   id?: string;
@@ -262,14 +278,11 @@ const currencyFormatter = new Intl.NumberFormat("en-PH", {
 const numberFormatter = new Intl.NumberFormat("en-PH");
 const pieColors = ["#2563eb", "#ef4444", "#f97316", "#16a34a", "#7c3aed", "#0891b2"];
 const itemsPerPage = 10;
-const productTabs: Array<{ id: ProductTab; label: string }> = [
-  { id: "basic", label: "Basic Details" },
-  { id: "pricing", label: "Pricing" },
-  { id: "stock", label: "Stock Settings" },
-  { id: "variants", label: "Variants" },
-  { id: "compatibility", label: "Compatibility" },
-  { id: "images", label: "Images" },
-  { id: "history", label: "History" },
+const productSteps: Array<{ id: ProductStep; label: string; subtitle: string }> = [
+  { id: "identity", label: "Identity", subtitle: "Product, SKU, barcode, brand, and tracking" },
+  { id: "pricingStock", label: "Pricing & Stock", subtitle: "Prices, quantity, reorder, and location" },
+  { id: "variantsFitment", label: "Variants & Fitment", subtitle: "Variants and motorcycle compatibility" },
+  { id: "mediaHistory", label: "Media & History", subtitle: "Images and stock movement history" },
 ];
 
 function createEmptyVariant(): ProductVariantForm {
@@ -321,6 +334,11 @@ function parseNumber(value: unknown) {
 
 function formatQuantity(quantity: number, unitType: string) {
   return `${numberFormatter.format(quantity)} ${unitType || "pcs"}`;
+}
+
+function formatSignedQuantity(quantity: number, unitType: string) {
+  const prefix = quantity > 0 ? "+" : "";
+  return `${prefix}${numberFormatter.format(quantity)} ${unitType || "pcs"}`;
 }
 
 function getStockStatus(item: InventoryItem) {
@@ -450,103 +468,24 @@ function formatMovementType(value: string) {
     .join(" ");
 }
 
-async function fetchInventorySnapshot(selectedBranchId: string): Promise<InventorySnapshot> {
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+async function fetchInventorySnapshot(selectedBranchId: string, token: string): Promise<InventorySnapshot> {
+  const response = await fetch(`/api/inventory/snapshot?branchId=${encodeURIComponent(selectedBranchId)}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
 
-  const [inventoryResult, movementResult] = await Promise.all([
-    supabase
-      .from("inventory_stocks")
-      .select(`
-        id,
-        product_id,
-        branch_id,
-        quantity,
-        updated_at,
-        branch:branches (
-          id,
-          name
-        ),
-        product:products (
-          id,
-          name,
-          part_number,
-          sku,
-          barcode,
-          supplier_code,
-          unit_type,
-          cost_price,
-          selling_price,
-          wholesale_price,
-          minimum_price,
-          reorder_level,
-          critical_stock_level,
-          shelf_location,
-          warranty_period_days,
-          status,
-          has_serial_tracking,
-          has_batch_tracking,
-          has_expiry_tracking,
-          category:categories (
-            id,
-            name
-          ),
-          brand:brands (
-            id,
-            name
-          ),
-          supplier:suppliers (
-            id,
-            name
-          ),
-          product_variants (
-            id,
-            variant_name,
-            variant_value,
-            sku,
-            barcode,
-            additional_cost,
-            additional_price,
-            additional_wholesale_price,
-            minimum_price,
-            product_variant_stocks (
-              quantity,
-              branch_id
-            )
-          ),
-          product_images (
-            url,
-            is_primary,
-            sort_order
-          ),
-          product_compatibility (
-            notes,
-            motorcycle_model:motorcycle_models (
-              id,
-              brand,
-              model_name,
-              engine_type,
-              year_from,
-              year_to
-            )
-          )
-        )
-      `)
-      .eq("branch_id", selectedBranchId)
-      .order("updated_at", { ascending: false }),
-    supabase
-      .from("stock_movements")
-      .select("product_id, quantity")
-      .eq("branch_id", selectedBranchId)
-      .gte("created_at", monthStart.toISOString()),
-  ]);
+  const result = (await response.json()) as {
+    inventoryRows?: InventorySourceRow[];
+    movementRows?: Array<{ product_id: string; quantity: number }>;
+    error?: string;
+  };
 
-  if (inventoryResult.error) {
-    throw inventoryResult.error;
+  if (!response.ok) {
+    throw new Error(result.error || "Unable to load inventory snapshot.");
   }
 
-  const rows = (inventoryResult.data ?? []) as unknown as InventorySourceRow[];
+  const rows = (result.inventoryRows ?? []) as InventorySourceRow[];
   const normalizedItems = rows
     .filter((row) => row.product)
     .map((row) => {
@@ -591,7 +530,7 @@ async function fetchInventorySnapshot(selectedBranchId: string): Promise<Invento
       } satisfies InventoryItem;
     });
 
-  const movementRows = (movementResult.data ?? []) as Array<{ product_id: string; quantity: number }>;
+  const movementRows = (result.movementRows ?? []) as Array<{ product_id: string; quantity: number }>;
   const movementMap = new Map<string, number>();
 
   movementRows.forEach((entry) => {
@@ -633,7 +572,10 @@ export default function InventoryPage() {
   const canUseBarcodePrinting = hasFeature("barcode_printing");
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [topMovingItems, setTopMovingItems] = useState<Array<{ productId: string; quantity: number }>>([]);
-  const [selectedBranchId, setSelectedBranchId] = useState("");
+  const [selectedBranchId, setSelectedBranchId] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem("active_branch_id") ?? "";
+  });
   const [searchValue, setSearchValue] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState("all");
   const [selectedBrandId, setSelectedBrandId] = useState("all");
@@ -643,35 +585,37 @@ export default function InventoryPage() {
   const [page, setPage] = useState(1);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<DialogMode>("create");
-  const [activeTab, setActiveTab] = useState<ProductTab>("basic");
+  const [activeStep, setActiveStep] = useState<ProductStep>("identity");
   const [editingItemId, setEditingItemId] = useState("");
+  const [quickActionOpen, setQuickActionOpen] = useState<InventoryQuickAction | null>(null);
+  const [quickActionState, setQuickActionState] = useState<QuickActionFormState>({
+    adjustMode: "delta",
+    adjustReason: "adjustment",
+    adjustQuantity: "1",
+    adjustNotes: "",
+    transferBranchId: "",
+    transferQuantity: "1",
+    transferNotes: "",
+    auditCountedQuantity: "0",
+    auditNotes: "",
+  });
   const [barcodeStudioOpen, setBarcodeStudioOpen] = useState(false);
   const [barcodeStudioProductId, setBarcodeStudioProductId] = useState("");
   const [selectedBarcodeIds, setSelectedBarcodeIds] = useState<string[]>([]);
   const [formState, setFormState] = useState<ProductFormState>(createEmptyFormState());
   const [historyRows, setHistoryRows] = useState<MovementRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [currentUserProfileId, setCurrentUserProfileId] = useState<string | null>(null);
-  const [operationSaving, setOperationSaving] = useState(false);
   const [inventoryBatches, setInventoryBatches] = useState<InventoryBatchRow[]>([]);
   const [inventorySerials, setInventorySerials] = useState<InventorySerialRow[]>([]);
   const [valuationTotals, setValuationTotals] = useState({ cost: 0, retail: 0 });
   const [expiringBatchItems, setExpiringBatchItems] = useState<InventoryBatchRow[]>([]);
-  const [adjustmentMode, setAdjustmentMode] = useState<"delta" | "set">("delta");
-  const [adjustmentReasonType, setAdjustmentReasonType] = useState<"adjustment" | "damage" | "return_out">("adjustment");
-  const [adjustmentQuantity, setAdjustmentQuantity] = useState("0");
-  const [adjustmentNotes, setAdjustmentNotes] = useState("");
-  const [transferQuantity, setTransferQuantity] = useState("1");
-  const [transferTargetBranchId, setTransferTargetBranchId] = useState("");
-  const [transferNotes, setTransferNotes] = useState("");
-  const [countedQuantity, setCountedQuantity] = useState("0");
-  const [countNotes, setCountNotes] = useState("");
-  const [countTargetProductId, setCountTargetProductId] = useState("");
-
-  const handleBranchChange = (value: string) => {
-    setSelectedBranchId(value);
-    setPage(1);
-  };
+  const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
+  const resolvedBranchId =
+    (selectedBranchId && branches.some((branch) => branch.id === selectedBranchId) && selectedBranchId) ||
+    (savedBranchId && branches.some((branch) => branch.id === savedBranchId) && savedBranchId) ||
+    branches.find((branch) => branch.is_main)?.id ||
+    branches[0]?.id ||
+    "";
 
   const handleSearchChange = (value: string) => {
     setSearchValue(value);
@@ -703,32 +647,14 @@ export default function InventoryPage() {
     return sessionResult.data.session?.access_token ?? "";
   };
 
-  const submitInventoryOperation = async (path: string, payload: Record<string, unknown>) => {
+  const refreshInventory = async (branchId: string) => {
     const token = await getAccessToken();
     if (!token) {
       throw new Error("Your session has expired. Please sign in again.");
     }
 
-    const response = await fetch(path, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.error || "Inventory operation failed.");
-    }
-
-    return result;
-  };
-
-  const refreshInventory = async (branchId: string) => {
     const [snapshot, valuationResult, expiringResult] = await Promise.all([
-      fetchInventorySnapshot(branchId),
+      fetchInventorySnapshot(branchId, token),
       supabase.from("v_inventory_valuation").select("product_id, quantity, total_cost_value, total_retail_value").eq("branch_id", branchId),
       supabase
         .from("v_expiring_inventory_batches")
@@ -757,19 +683,11 @@ export default function InventoryPage() {
 
     const loadLookups = async () => {
       const [
-        branchResult,
         categoryResult,
         brandResult,
         supplierResult,
         motorcycleModelResult,
-        authResult,
       ] = await Promise.all([
-        supabase
-          .from("branches")
-          .select("id, name, is_main")
-          .eq("is_active", true)
-          .order("is_main", { ascending: false })
-          .order("name", { ascending: true }),
         supabase.from("categories").select("id, name").eq("is_active", true).order("name", { ascending: true }),
         supabase.from("brands").select("id, name").eq("is_active", true).order("name", { ascending: true }),
         supabase.from("suppliers").select("id, name").eq("is_active", true).order("name", { ascending: true }),
@@ -779,39 +697,62 @@ export default function InventoryPage() {
           .eq("is_active", true)
           .order("brand", { ascending: true })
           .order("model_name", { ascending: true }),
-        supabase.auth.getUser(),
       ]);
 
       if (!isMounted) return;
 
-      const branchRows = (branchResult.data ?? []) as BranchOption[];
+      const token = (await getAccessToken()).trim();
+      const branchRows = token ? ((await fetchBranchOptions(token)) as BranchOption[]) : [];
       const mainBranch = branchRows.find((branch) => branch.is_main) ?? branchRows[0] ?? null;
+      const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") : null;
 
       setBranches(branchRows);
       setCategories((categoryResult.data ?? []) as FilterOption[]);
       setBrands((brandResult.data ?? []) as FilterOption[]);
       setSuppliers((supplierResult.data ?? []) as FilterOption[]);
       setMotorcycleModels((motorcycleModelResult.data ?? []) as MotorcycleModelOption[]);
-      setSelectedBranchId((current) => current || mainBranch?.id || "");
+      setSelectedBranchId((current) => {
+        const validBranchIds = new Set(branchRows.map((branch) => branch.id));
+        if (current && validBranchIds.has(current)) return current;
+        if (savedBranchId && validBranchIds.has(savedBranchId)) return savedBranchId;
+        return mainBranch?.id || branchRows[0]?.id || current || "";
+      });
 
-      const authUserId = authResult.data.user?.id;
-      if (authUserId) {
-        const profileResult = await supabase.from("users").select("id").eq("auth_id", authUserId).maybeSingle();
-        if (isMounted) {
-          setCurrentUserProfileId((profileResult.data as { id?: string } | null)?.id ?? null);
-        }
+      if (!mainBranch?.id) {
+        setLoading(false);
       }
+    };
+
+    const scheduleLoad = () => {
+      void loadLookups();
     };
 
     void loadLookups();
 
+    const { data: authState } = supabase.auth.onAuthStateChange(() => {
+      scheduleLoad();
+    });
+
     return () => {
       isMounted = false;
+      authState.subscription.unsubscribe();
     };
   }, []);
 
   useEffect(() => {
-    if (!selectedBranchId) return;
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id) {
+        setSelectedBranchId(detail.id);
+      }
+    };
+
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
+  }, []);
+
+  useEffect(() => {
+    if (!resolvedBranchId) return;
 
     let isMounted = true;
 
@@ -820,13 +761,18 @@ export default function InventoryPage() {
       setError("");
 
       try {
+        const token = await getAccessToken();
+        if (!token) {
+          throw new Error("Your session has expired. Please sign in again.");
+        }
+
         const [snapshot, valuationResult, expiringResult] = await Promise.all([
-          fetchInventorySnapshot(selectedBranchId),
-          supabase.from("v_inventory_valuation").select("product_id, quantity, total_cost_value, total_retail_value").eq("branch_id", selectedBranchId),
+          fetchInventorySnapshot(resolvedBranchId, token),
+          supabase.from("v_inventory_valuation").select("product_id, quantity, total_cost_value, total_retail_value").eq("branch_id", resolvedBranchId),
           supabase
             .from("v_expiring_inventory_batches")
             .select("id, batch_number, quantity_received, quantity_on_hand, expiry_date, created_at")
-            .eq("branch_id", selectedBranchId)
+            .eq("branch_id", resolvedBranchId)
             .order("expiry_date", { ascending: true })
             .limit(5),
         ]);
@@ -859,7 +805,7 @@ export default function InventoryPage() {
     return () => {
       isMounted = false;
     };
-  }, [selectedBranchId]);
+  }, [resolvedBranchId]);
 
   useEffect(() => {
     if (!notice) return;
@@ -869,7 +815,7 @@ export default function InventoryPage() {
   }, [notice]);
 
   useEffect(() => {
-    if (!dialogOpen || !editingItemId || !selectedBranchId) return;
+    if (!dialogOpen || !editingItemId || !resolvedBranchId) return;
 
     let isMounted = true;
 
@@ -879,7 +825,7 @@ export default function InventoryPage() {
         .from("stock_movements")
         .select("id, product_id, movement_type, quantity, quantity_before, quantity_after, reference_type, notes, created_at")
         .eq("product_id", editingItemId)
-        .eq("branch_id", selectedBranchId)
+        .eq("branch_id", resolvedBranchId)
         .order("created_at", { ascending: false })
         .limit(12);
 
@@ -894,10 +840,10 @@ export default function InventoryPage() {
     return () => {
       isMounted = false;
     };
-  }, [dialogOpen, editingItemId, selectedBranchId]);
+  }, [dialogOpen, editingItemId, resolvedBranchId]);
 
   useEffect(() => {
-    if (!selectedItemId || !selectedBranchId) return;
+    if (!selectedItemId || !resolvedBranchId) return;
 
     let isMounted = true;
 
@@ -907,13 +853,13 @@ export default function InventoryPage() {
           .from("inventory_batches")
           .select("id, batch_number, quantity_received, quantity_on_hand, expiry_date, created_at")
           .eq("product_id", selectedItemId)
-          .eq("branch_id", selectedBranchId)
+          .eq("branch_id", resolvedBranchId)
           .order("created_at", { ascending: false }),
         supabase
           .from("inventory_serial_numbers")
           .select("id, serial_number, status, created_at")
           .eq("product_id", selectedItemId)
-          .eq("branch_id", selectedBranchId)
+          .eq("branch_id", resolvedBranchId)
           .order("created_at", { ascending: false })
           .limit(30),
       ]);
@@ -928,7 +874,7 @@ export default function InventoryPage() {
     return () => {
       isMounted = false;
     };
-  }, [selectedItemId, selectedBranchId]);
+  }, [selectedItemId, resolvedBranchId]);
 
   const filteredItems = inventoryItems.filter((item) => {
     const searchNeedle = searchValue.trim().toLowerCase();
@@ -955,6 +901,7 @@ export default function InventoryPage() {
     filteredItems[0] ??
     inventoryItems[0] ??
     null;
+  const quickActionItem = selectedItem ?? filteredItems[0] ?? inventoryItems[0] ?? null;
 
   const totalItems = filteredItems.length;
   const inStockItems = filteredItems.filter((item) => getStockStatus(item) === "in_stock").length;
@@ -979,14 +926,10 @@ export default function InventoryPage() {
     }))
     .filter((entry): entry is { quantity: number; item: InventoryItem } => Boolean(entry.item));
 
-  const activeBranch = branches.find((branch) => branch.id === selectedBranchId);
-  const firstOtherBranchId = branches.find((branch) => branch.id !== selectedBranchId)?.id ?? "";
-  const effectiveTransferTargetBranchId =
-    transferTargetBranchId && transferTargetBranchId !== selectedBranchId
-      ? transferTargetBranchId
-      : firstOtherBranchId;
-  const effectiveCountedQuantity =
-    selectedItem && countTargetProductId !== selectedItem.id ? String(selectedItem.quantity) : countedQuantity;
+  const activeBranch = branches.find((branch) => branch.id === resolvedBranchId);
+  const activeStepIndex = productSteps.findIndex((step) => step.id === activeStep);
+  const isFirstStep = activeStepIndex <= 0;
+  const isLastStep = activeStepIndex === productSteps.length - 1;
 
   const selectedFormModels = motorcycleModels.filter((model) => formState.compatibleModelIds.includes(model.id));
   const barcodeStudioProducts = inventoryItems.map((item) => ({
@@ -1009,11 +952,21 @@ export default function InventoryPage() {
     }));
   };
 
+  const goToPreviousStep = () => {
+    const previousStep = productSteps[Math.max(0, activeStepIndex - 1)]?.id ?? productSteps[0].id;
+    setActiveStep(previousStep);
+  };
+
+  const goToNextStep = () => {
+    const nextStep = productSteps[Math.min(productSteps.length - 1, activeStepIndex + 1)]?.id ?? productSteps[0].id;
+    setActiveStep(nextStep);
+  };
+
   const openCreateDialog = () => {
     setDialogMode("create");
     setEditingItemId("");
     setFormState(createEmptyFormState());
-    setActiveTab("basic");
+    setActiveStep("identity");
     setHistoryRows([]);
     setDialogOpen(true);
   };
@@ -1022,7 +975,7 @@ export default function InventoryPage() {
     setDialogMode("edit");
     setEditingItemId(item.id);
     setFormState(createFormStateFromItem(item));
-    setActiveTab("basic");
+    setActiveStep("identity");
     setDialogOpen(true);
   };
 
@@ -1050,6 +1003,157 @@ export default function InventoryPage() {
     setBarcodeStudioProductId(targetItem.id);
     setSelectedBarcodeIds((current) => (current.length ? Array.from(new Set([...current, targetItem.id])) : [targetItem.id]));
     setBarcodeStudioOpen(true);
+  };
+
+  const openQuickAction = (action: InventoryQuickAction) => {
+    const targetItem = selectedItem ?? filteredItems[0] ?? inventoryItems[0] ?? null;
+    if (!targetItem) {
+      setNotice({ tone: "error", message: "Select an inventory item first." });
+      return;
+    }
+
+    setSelectedItemId(targetItem.id);
+    setQuickActionState({
+      adjustMode: "delta",
+      adjustReason: action === "adjust" ? "adjustment" : "adjustment",
+      adjustQuantity: "1",
+      adjustNotes: "",
+      transferBranchId: branches.find((branch) => branch.id !== resolvedBranchId)?.id ?? "",
+      transferQuantity: "1",
+      transferNotes: "",
+      auditCountedQuantity: String(targetItem.quantity),
+      auditNotes: "",
+    });
+    setQuickActionOpen(action);
+  };
+
+  const closeQuickAction = () => {
+    setQuickActionOpen(null);
+  };
+
+  const updateQuickActionField = <K extends keyof QuickActionFormState>(key: K, value: QuickActionFormState[K]) => {
+    setQuickActionState((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  };
+
+  const submitQuickAction = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!quickActionOpen || !quickActionItem || !resolvedBranchId) {
+      setNotice({ tone: "error", message: "Select an inventory item first." });
+      return;
+    }
+
+    try {
+      setSaving(true);
+
+      const token = await getAccessToken();
+      if (!token) {
+        throw new Error("Your session has expired. Please sign in again.");
+      }
+
+      const headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      };
+
+      if (quickActionOpen === "adjust") {
+        const quantityValue = Math.max(0, parseNumber(quickActionState.adjustQuantity));
+        if (!Number.isFinite(quantityValue)) {
+          throw new Error("Adjustment quantity must be a valid number.");
+        }
+
+        const signedQuantity =
+          quickActionState.adjustMode === "set"
+            ? quantityValue
+            : quickActionState.adjustReason === "damage" || quickActionState.adjustReason === "return_out"
+              ? -Math.abs(quantityValue)
+              : Math.abs(quantityValue);
+
+        const response = await fetch("/api/inventory/adjustments", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            productId: quickActionItem.id,
+            branchId: resolvedBranchId,
+            quantity: signedQuantity,
+            mode: quickActionState.adjustMode,
+            reasonType: quickActionState.adjustReason,
+            notes: quickActionState.adjustNotes,
+          }),
+        });
+
+        const payload = (await response.json()) as { error?: string; quantityAfter?: number };
+        if (!response.ok) {
+          throw new Error(payload.error || "Unable to save adjustment.");
+        }
+
+        setNotice({
+          tone: "success",
+          message: `Stock adjustment saved. New quantity: ${formatQuantity(payload.quantityAfter ?? quickActionItem.quantity, quickActionItem.unitType)}.`,
+        });
+      }
+
+      if (quickActionOpen === "transfer") {
+        if (!quickActionState.transferBranchId) {
+          throw new Error("Select a destination branch.");
+        }
+
+        const response = await fetch("/api/inventory/transfers", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            productId: quickActionItem.id,
+            fromBranchId: resolvedBranchId,
+            toBranchId: quickActionState.transferBranchId,
+            quantity: Math.max(0, parseNumber(quickActionState.transferQuantity)),
+            notes: quickActionState.transferNotes,
+          }),
+        });
+
+        const payload = (await response.json()) as { error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error || "Unable to save transfer.");
+        }
+
+        setNotice({
+          tone: "success",
+          message: `Stock transfer saved for ${quickActionItem.name}.`,
+        });
+      }
+
+      if (quickActionOpen === "audit") {
+        const response = await fetch("/api/inventory/stock-counts", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            productId: quickActionItem.id,
+            branchId: resolvedBranchId,
+            countedQuantity: Math.max(0, parseNumber(quickActionState.auditCountedQuantity)),
+            notes: quickActionState.auditNotes,
+          }),
+        });
+
+        const payload = (await response.json()) as { error?: string; variance?: number };
+        if (!response.ok) {
+          throw new Error(payload.error || "Unable to save stock count.");
+        }
+
+        setNotice({
+          tone: "success",
+          message: `Stock count saved. Variance: ${formatSignedQuantity(payload.variance ?? 0, quickActionItem.unitType)}.`,
+        });
+      }
+
+      closeQuickAction();
+      await refreshInventory(resolvedBranchId);
+    } catch (error) {
+      setNotice({ tone: "error", message: error instanceof Error ? error.message : "Unable to save inventory action." });
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleImageUpload = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1126,7 +1230,7 @@ export default function InventoryPage() {
   const validateForm = () => {
     if (!formState.name.trim()) return "Product name is required.";
     if (!formState.sku.trim()) return "SKU is required.";
-    if (!selectedBranchId) return "Please select a branch first.";
+    if (!resolvedBranchId) return "Please select a branch first.";
     return "";
   };
 
@@ -1139,189 +1243,59 @@ export default function InventoryPage() {
       return;
     }
 
-    const previousItem = inventoryItems.find((item) => item.id === editingItemId) ?? null;
-    const nextQuantity = Math.max(0, parseNumber(formState.quantity));
-    const previousQuantity = previousItem?.quantity ?? 0;
-
     setSaving(true);
 
     try {
-      const productPayload = {
-        name: formState.name.trim(),
-        part_number: formState.partNumber.trim() || null,
-        sku: formState.sku.trim(),
-        barcode: formState.barcode.trim() || null,
-        supplier_code: formState.supplierCode.trim() || null,
-        category_id: formState.categoryId || null,
-        brand_id: formState.brandId || null,
-        supplier_id: formState.supplierId || null,
-        unit_type: formState.unitType.trim() || "pcs",
-        cost_price: parseNumber(formState.costPrice),
-        selling_price: parseNumber(formState.sellingPrice),
-        wholesale_price: parseNumber(formState.wholesalePrice),
-        minimum_price: parseNumber(formState.minimumPrice),
-        reorder_level: Math.max(0, parseNumber(formState.reorderLevel)),
-        critical_stock_level: Math.max(0, parseNumber(formState.criticalStockLevel)),
-        shelf_location: formState.shelfLocation.trim() || null,
-        warranty_period_days: Math.max(0, parseNumber(formState.warrantyDays)),
-        has_serial_tracking: formState.hasSerialTracking,
-        has_batch_tracking: formState.hasBatchTracking,
-        has_expiry_tracking: formState.hasExpiryTracking,
-        status: formState.status,
-      };
-
-      const productResult =
-        dialogMode === "edit" && editingItemId
-          ? await supabase.from("products").update(productPayload).eq("id", editingItemId).select("id").single()
-          : await supabase
-              .from("products")
-              .insert({
-                ...productPayload,
-                created_by: currentUserProfileId,
-              })
-              .select("id")
-              .single();
-
-      if (productResult.error || !productResult.data?.id) {
-        throw productResult.error ?? new Error("Unable to save product.");
+      const token = await getAccessToken();
+      if (!token) {
+        throw new Error("Your session has expired. Please sign in again.");
       }
 
-      const productId = productResult.data.id as string;
-
-      const stockResult = await supabase.from("inventory_stocks").upsert(
-        {
-          product_id: productId,
-          branch_id: selectedBranchId,
-          quantity: nextQuantity,
-          updated_at: new Date().toISOString(),
+      const response = await fetch("/api/inventory/products", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
-        {
-          onConflict: "product_id,branch_id",
-        }
-      );
+        body: JSON.stringify({
+          productId: dialogMode === "edit" ? editingItemId : undefined,
+          branchId: resolvedBranchId,
+          product: {
+            name: formState.name.trim(),
+            part_number: formState.partNumber.trim() || null,
+            sku: formState.sku.trim(),
+            barcode: formState.barcode.trim() || null,
+            supplier_code: formState.supplierCode.trim() || null,
+            category_id: formState.categoryId || null,
+            brand_id: formState.brandId || null,
+            supplier_id: formState.supplierId || null,
+            unit_type: formState.unitType.trim() || "pcs",
+            cost_price: parseNumber(formState.costPrice),
+            selling_price: parseNumber(formState.sellingPrice),
+            wholesale_price: parseNumber(formState.wholesalePrice),
+            minimum_price: parseNumber(formState.minimumPrice),
+            quantity: Math.max(0, parseNumber(formState.quantity)),
+            reorder_level: Math.max(0, parseNumber(formState.reorderLevel)),
+            critical_stock_level: Math.max(0, parseNumber(formState.criticalStockLevel)),
+            shelf_location: formState.shelfLocation.trim() || null,
+            warranty_period_days: Math.max(0, parseNumber(formState.warrantyDays)),
+            has_serial_tracking: formState.hasSerialTracking,
+            has_batch_tracking: formState.hasBatchTracking,
+            has_expiry_tracking: formState.hasExpiryTracking,
+            status: formState.status,
+          },
+          imageUrl: formState.imageUrl.trim(),
+          compatibleModelIds: formState.compatibleModelIds,
+          variants: formState.variants,
+        }),
+      });
 
-      if (stockResult.error) {
-        throw stockResult.error;
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Unable to save product.");
       }
 
-      const movementDelta = nextQuantity - previousQuantity;
-      if (dialogMode === "create" || movementDelta !== 0) {
-        const movementType = dialogMode === "create" ? "initial" : "adjustment";
-        const movementResult = await supabase.from("stock_movements").insert({
-          product_id: productId,
-          branch_id: selectedBranchId,
-          movement_type: movementType,
-          quantity: dialogMode === "create" ? nextQuantity : movementDelta,
-          quantity_before: previousQuantity,
-          quantity_after: nextQuantity,
-          reference_type: "inventory_form",
-          reference_id: productId,
-          notes:
-            dialogMode === "create"
-              ? "Initial stock set from inventory product form."
-              : "Stock updated from inventory product form.",
-          created_by: currentUserProfileId,
-        });
-
-        if (movementResult.error) {
-          throw movementResult.error;
-        }
-      }
-
-      const deleteImagesResult = await supabase.from("product_images").delete().eq("product_id", productId);
-      if (deleteImagesResult.error) {
-        throw deleteImagesResult.error;
-      }
-
-      if (formState.imageUrl.trim()) {
-        const imageResult = await supabase.from("product_images").insert({
-          product_id: productId,
-          url: formState.imageUrl.trim(),
-          is_primary: true,
-          sort_order: 0,
-        });
-
-        if (imageResult.error) {
-          throw imageResult.error;
-        }
-      }
-
-      const deleteCompatibilityResult = await supabase.from("product_compatibility").delete().eq("product_id", productId);
-      if (deleteCompatibilityResult.error) {
-        throw deleteCompatibilityResult.error;
-      }
-
-      if (formState.compatibleModelIds.length) {
-        const compatibilityResult = await supabase.from("product_compatibility").insert(
-          formState.compatibleModelIds.map((modelId) => ({
-            product_id: productId,
-            motorcycle_model_id: modelId,
-          }))
-        );
-
-        if (compatibilityResult.error) {
-          throw compatibilityResult.error;
-        }
-      }
-
-      const deleteVariantsResult = await supabase.from("product_variants").delete().eq("product_id", productId);
-      if (deleteVariantsResult.error) {
-        throw deleteVariantsResult.error;
-      }
-
-      const variantRows = formState.variants.filter(
-        (variant) => variant.variantName.trim() && variant.variantValue.trim()
-      );
-      if (variantRows.length) {
-        const variantResult = await supabase.from("product_variants").insert(
-          variantRows.map((variant) => ({
-            product_id: productId,
-            variant_name: variant.variantName.trim(),
-            variant_value: variant.variantValue.trim(),
-            sku: variant.sku.trim() || null,
-            barcode: variant.barcode.trim() || null,
-            additional_cost: parseNumber(variant.additionalCost),
-            additional_price: parseNumber(variant.additionalPrice),
-            additional_wholesale_price: parseNumber(variant.additionalWholesalePrice),
-            minimum_price: parseNumber(variant.minimumPrice),
-          }))
-        ).select("id, variant_name, variant_value");
-
-        if (variantResult.error || !variantResult.data) {
-          throw variantResult.error;
-        }
-
-        const insertedVariants = variantResult.data as Array<{ id: string; variant_name: string; variant_value: string }>;
-        const stockRows = insertedVariants
-          .map((insertedVariant) => {
-            const matched = variantRows.find(
-              (variant) =>
-                variant.variantName.trim() === insertedVariant.variant_name &&
-                variant.variantValue.trim() === insertedVariant.variant_value
-            );
-
-            if (!matched) return null;
-            return {
-              variant_id: insertedVariant.id,
-              branch_id: selectedBranchId,
-              quantity: Math.max(0, parseNumber(matched.quantity)),
-              updated_at: new Date().toISOString(),
-            };
-          })
-          .filter((row): row is { variant_id: string; branch_id: string; quantity: number; updated_at: string } => Boolean(row));
-
-        if (stockRows.length) {
-          const stockResult = await supabase.from("product_variant_stocks").upsert(stockRows, {
-            onConflict: "variant_id,branch_id",
-          });
-
-          if (stockResult.error) {
-            throw stockResult.error;
-          }
-        }
-      }
-
-      await refreshInventory(selectedBranchId);
+      await refreshInventory(resolvedBranchId);
       setDialogOpen(false);
       setNotice({
         tone: "success",
@@ -1344,12 +1318,26 @@ export default function InventoryPage() {
     setDeleting(true);
 
     try {
-      const result = await supabase.from("products").delete().eq("id", item.id);
-      if (result.error) {
-        throw result.error;
+      const token = await getAccessToken();
+      if (!token) {
+        throw new Error("Your session has expired. Please sign in again.");
       }
 
-      await refreshInventory(selectedBranchId);
+      const response = await fetch("/api/inventory/products", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ productId: item.id, branchId: resolvedBranchId }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to delete product.");
+      }
+
+      await refreshInventory(resolvedBranchId);
       if (editingItemId === item.id) {
         setDialogOpen(false);
       }
@@ -1361,85 +1349,6 @@ export default function InventoryPage() {
       });
     } finally {
       setDeleting(false);
-    }
-  };
-
-  const handleApplyAdjustment = async () => {
-    if (!selectedItem) {
-      setNotice({ tone: "error", message: "Select a product first." });
-      return;
-    }
-
-    setOperationSaving(true);
-    try {
-      await submitInventoryOperation("/api/inventory/adjustments", {
-        productId: selectedItem.id,
-        branchId: selectedBranchId,
-        quantity: Number(adjustmentQuantity),
-        mode: adjustmentMode,
-        reasonType: adjustmentReasonType,
-        notes: adjustmentNotes,
-      });
-      await refreshInventory(selectedBranchId);
-      setAdjustmentQuantity("0");
-      setAdjustmentNotes("");
-      setNotice({ tone: "success", message: "Stock adjustment posted successfully." });
-    } catch (error) {
-      setNotice({ tone: "error", message: error instanceof Error ? error.message : "Unable to adjust stock." });
-    } finally {
-      setOperationSaving(false);
-    }
-  };
-
-  const handleTransferStock = async () => {
-    if (!selectedItem) {
-      setNotice({ tone: "error", message: "Select a product first." });
-      return;
-    }
-
-    setOperationSaving(true);
-    try {
-      await submitInventoryOperation("/api/inventory/transfers", {
-        productId: selectedItem.id,
-        fromBranchId: selectedBranchId,
-        toBranchId: effectiveTransferTargetBranchId,
-        quantity: Number(transferQuantity),
-        notes: transferNotes,
-      });
-      await refreshInventory(selectedBranchId);
-      setTransferQuantity("1");
-      setTransferNotes("");
-      setNotice({ tone: "success", message: "Stock transfer recorded successfully." });
-    } catch (error) {
-      setNotice({ tone: "error", message: error instanceof Error ? error.message : "Unable to transfer stock." });
-    } finally {
-      setOperationSaving(false);
-    }
-  };
-
-  const handlePostStockCount = async () => {
-    if (!selectedItem) {
-      setNotice({ tone: "error", message: "Select a product first." });
-      return;
-    }
-
-    setOperationSaving(true);
-    try {
-      await submitInventoryOperation("/api/inventory/stock-counts", {
-        productId: selectedItem.id,
-        branchId: selectedBranchId,
-        countedQuantity: Number(effectiveCountedQuantity),
-        notes: countNotes,
-      });
-      await refreshInventory(selectedBranchId);
-      setCountNotes("");
-      setCountTargetProductId(selectedItem.id);
-      setCountedQuantity(String(Number(effectiveCountedQuantity)));
-      setNotice({ tone: "success", message: "Stock count posted and inventory synced." });
-    } catch (error) {
-      setNotice({ tone: "error", message: error instanceof Error ? error.message : "Unable to post stock count." });
-    } finally {
-      setOperationSaving(false);
     }
   };
 
@@ -1458,18 +1367,6 @@ export default function InventoryPage() {
           </div>
 
           <div className="inventory-header__actions">
-            <select
-              className="inventory-control inventory-control--branch"
-              value={selectedBranchId}
-              onChange={(event) => handleBranchChange(event.target.value)}
-            >
-              {branches.map((branch) => (
-                <option key={branch.id} value={branch.id}>
-                  {branch.name}
-                </option>
-              ))}
-            </select>
-
             <label className="inventory-search">
               <Search size={16} />
               <input
@@ -1549,76 +1446,104 @@ export default function InventoryPage() {
 
         <section className="inventory-panel">
           <div className="inventory-toolbar">
-            <div className="inventory-toolbar__filters">
-              <select
-                className="inventory-control"
-                value={selectedCategoryId}
-                onChange={(event) => handleCategoryChange(event.target.value)}
-              >
-                <option value="all">All Categories</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
+            <div className="inventory-toolbar__top">
+              <div className="inventory-toolbar__filters">
+                <select
+                  className="inventory-control"
+                  value={selectedCategoryId}
+                  onChange={(event) => handleCategoryChange(event.target.value)}
+                >
+                  <option value="all">All Categories</option>
+                  {categories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
 
-              <select
-                className="inventory-control"
-                value={selectedBrandId}
-                onChange={(event) => handleBrandChange(event.target.value)}
-              >
-                <option value="all">All Brands</option>
-                {brands.map((brand) => (
-                  <option key={brand.id} value={brand.id}>
-                    {brand.name}
-                  </option>
-                ))}
-              </select>
+                <select
+                  className="inventory-control"
+                  value={selectedBrandId}
+                  onChange={(event) => handleBrandChange(event.target.value)}
+                >
+                  <option value="all">All Brands</option>
+                  {brands.map((brand) => (
+                    <option key={brand.id} value={brand.id}>
+                      {brand.name}
+                    </option>
+                  ))}
+                </select>
 
-              <select
-                className="inventory-control"
-                value={selectedSupplierId}
-                onChange={(event) => handleSupplierChange(event.target.value)}
-              >
-                <option value="all">All Suppliers</option>
-                {suppliers.map((supplier) => (
-                  <option key={supplier.id} value={supplier.id}>
-                    {supplier.name}
-                  </option>
-                ))}
-              </select>
+                <select
+                  className="inventory-control"
+                  value={selectedSupplierId}
+                  onChange={(event) => handleSupplierChange(event.target.value)}
+                >
+                  <option value="all">All Suppliers</option>
+                  {suppliers.map((supplier) => (
+                    <option key={supplier.id} value={supplier.id}>
+                      {supplier.name}
+                    </option>
+                  ))}
+                </select>
 
-              <select
-                className="inventory-control"
-                value={selectedStatus}
-                onChange={(event) => handleStatusChange(event.target.value as StatusFilter)}
-              >
-                <option value="all">All Status</option>
-                <option value="in_stock">In Stock</option>
-                <option value="low_stock">Low Stock</option>
-                <option value="out_of_stock">Out of Stock</option>
-                <option value="inactive">Inactive</option>
-              </select>
+                <select
+                  className="inventory-control"
+                  value={selectedStatus}
+                  onChange={(event) => handleStatusChange(event.target.value as StatusFilter)}
+                >
+                  <option value="all">All Status</option>
+                  <option value="in_stock">In Stock</option>
+                  <option value="low_stock">Low Stock</option>
+                  <option value="out_of_stock">Out of Stock</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </div>
+
+              <label className="inventory-toolbar__search">
+                <Search size={16} />
+                <input
+                  type="search"
+                  placeholder="Search barcode or search item..."
+                  value={searchValue}
+                  onChange={(event) => handleSearchChange(event.target.value)}
+                />
+              </label>
+              <div className="inventory-toolbar__actions">
+                <button type="button" className="inventory-action inventory-action--light">
+                  <Upload size={14} />
+                  <span>Export</span>
+                </button>
+                <button type="button" className="inventory-action inventory-action--light">
+                  <PackagePlus size={14} />
+                  <span>Import</span>
+                </button>
+                <button type="button" className="inventory-action inventory-action--light" onClick={() => openBarcodeStudio()} disabled={!canUseBarcodePrinting}>
+                  <Barcode size={14} />
+                  <span>{selectedBarcodeIds.length ? `Barcode Printing (${selectedBarcodeIds.length})` : "Barcode Printing"}</span>
+                </button>
+                <button type="button" className="inventory-action inventory-action--primary" onClick={openCreateDialog}>
+                  <PackagePlus size={14} />
+                  <span>Add New Item</span>
+                </button>
+              </div>
             </div>
 
-            <div className="inventory-toolbar__actions">
-              <button type="button" className="inventory-action inventory-action--light">
-                <Upload size={14} />
-                <span>Export</span>
-              </button>
-              <button type="button" className="inventory-action inventory-action--light">
-                <PackagePlus size={14} />
-                <span>Import</span>
-              </button>
-              <button type="button" className="inventory-action inventory-action--light" onClick={() => openBarcodeStudio()} disabled={!canUseBarcodePrinting}>
-                <Barcode size={14} />
-                <span>{selectedBarcodeIds.length ? `Barcode Printing (${selectedBarcodeIds.length})` : "Barcode Printing"}</span>
-              </button>
-              <button type="button" className="inventory-action inventory-action--primary" onClick={openCreateDialog}>
-                <PackagePlus size={14} />
-                <span>Add New Item</span>
-              </button>
+            <div className="inventory-toolbar__bottom">
+              <div className="inventory-toolbar__actions inventory-toolbar__actions--secondary">
+                <button type="button" className="inventory-action inventory-action--light" onClick={() => openQuickAction("adjust")}>
+                  <Box size={14} />
+                  <span>Stock Adjustment</span>
+                </button>
+                <button type="button" className="inventory-action inventory-action--light" onClick={() => openQuickAction("transfer")}>
+                  <ArrowLeftRight size={14} />
+                  <span>Branch Transfer</span>
+                </button>
+                <button type="button" className="inventory-action inventory-action--light" onClick={() => openQuickAction("audit")}>
+                  <History size={14} />
+                  <span>Stock Count / Audit</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1636,8 +1561,9 @@ export default function InventoryPage() {
           ) : (
             <>
             <div className="inventory-content-grid">
-              <div className="inventory-table-card">
-                <div className="inventory-table-wrap">
+              <div className="inventory-main-column">
+                <div className="inventory-table-card">
+                  <div className="inventory-table-wrap">
                   <table className="inventory-table">
                     <thead>
                       <tr>
@@ -1784,31 +1710,167 @@ export default function InventoryPage() {
                   ) : null}
                 </div>
 
-                <div className="inventory-table-footer">
-                  <span>
-                    Showing {paginatedItems.length ? (activePage - 1) * itemsPerPage + 1 : 0} to{" "}
-                    {Math.min(activePage * itemsPerPage, filteredItems.length)} of {filteredItems.length} items
-                  </span>
+                  <div className="inventory-table-footer">
+                    <span>
+                      Showing {paginatedItems.length ? (activePage - 1) * itemsPerPage + 1 : 0} to{" "}
+                      {Math.min(activePage * itemsPerPage, filteredItems.length)} of {filteredItems.length} items
+                    </span>
 
-                  <div className="inventory-pagination">
-                    <button
-                      type="button"
-                      className="inventory-pagination__button"
-                      onClick={() => setPage((current) => Math.max(1, current - 1))}
-                      disabled={activePage <= 1}
-                    >
-                      <ArrowLeft size={14} />
-                    </button>
-                    <span className="inventory-pagination__current">{activePage}</span>
-                    <button
-                      type="button"
-                      className="inventory-pagination__button"
-                      onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-                      disabled={activePage >= totalPages}
-                    >
-                      <ArrowRight size={14} />
-                    </button>
+                    <div className="inventory-pagination">
+                      <button
+                        type="button"
+                        className="inventory-pagination__button"
+                        onClick={() => setPage((current) => Math.max(1, current - 1))}
+                        disabled={activePage <= 1}
+                      >
+                        <ArrowLeft size={14} />
+                      </button>
+                      <span className="inventory-pagination__current">{activePage}</span>
+                      <button
+                        type="button"
+                        className="inventory-pagination__button"
+                        onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                        disabled={activePage >= totalPages}
+                      >
+                        <ArrowRight size={14} />
+                      </button>
+                    </div>
                   </div>
+                </div>
+
+                <div className="inventory-bottom-grid">
+                  <section className="inventory-mini-card">
+                    <div className="inventory-mini-card__header">
+                      <span>Stock Overview by Category</span>
+                    </div>
+                    <div className="inventory-overview">
+                      <div className="inventory-overview__chart">
+                        {hasMounted && stockOverview.length ? (
+                          <ResponsiveContainer width="100%" height={150}>
+                            <PieChart>
+                              <Pie
+                                data={stockOverview}
+                                dataKey="value"
+                                nameKey="name"
+                                innerRadius={36}
+                                outerRadius={62}
+                                paddingAngle={2}
+                              >
+                                {stockOverview.map((entry, index) => (
+                                  <Cell key={entry.name} fill={pieColors[index % pieColors.length]} />
+                                ))}
+                              </Pie>
+                            </PieChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="inventory-overview__empty">No category stock data yet</div>
+                        )}
+                      </div>
+
+                      <div className="inventory-overview__legend">
+                        {stockOverview.map((entry, index) => (
+                          <div key={entry.name} className="inventory-overview__legend-row">
+                            <span className="inventory-overview__legend-group">
+                              <span className="inventory-overview__legend-dot" style={{ backgroundColor: pieColors[index % pieColors.length] }} />
+                              <span>{entry.name}</span>
+                            </span>
+                            <strong>{numberFormatter.format(entry.value)}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="inventory-mini-card">
+                    <div className="inventory-mini-card__header">
+                      <span>Low Stock Alerts</span>
+                    </div>
+                    <div className="inventory-mini-card__list inventory-mini-card__list--compact">
+                      {lowStockItems.slice(0, 5).map((item) => (
+                        <div key={item.id} className="inventory-alert-row">
+                          <div>
+                            <strong>{item.name}</strong>
+                            <span>{item.partNumber || item.sku}</span>
+                          </div>
+                          <div className="inventory-alert-row__meta">
+                            <span>Stock: {item.quantity}</span>
+                            <span>Reorder: {item.reorderLevel}</span>
+                          </div>
+                        </div>
+                      ))}
+
+                      {!lowStockItems.length ? <div className="inventory-overview__empty">No low stock alerts for this branch</div> : null}
+                    </div>
+                  </section>
+
+                  <section className="inventory-mini-card">
+                    <div className="inventory-mini-card__header">
+                      <span>Top Moving Items This Month</span>
+                    </div>
+                    <div className="inventory-mini-card__list inventory-mini-card__list--compact">
+                      {topMovingProducts.map(({ item, quantity }) => (
+                        <div key={item.id} className="inventory-top-row">
+                          <div className="inventory-top-row__main">
+                            <strong>{item.name}</strong>
+                            <span>{item.brandName}</span>
+                          </div>
+                          <strong>{numberFormatter.format(quantity)} pcs</strong>
+                        </div>
+                      ))}
+
+                      {!topMovingProducts.length ? <div className="inventory-overview__empty">No stock movement records yet</div> : null}
+                    </div>
+                  </section>
+
+                  <section className="inventory-mini-card">
+                    <div className="inventory-mini-card__header">
+                      <span>Inventory Valuation</span>
+                    </div>
+                    <div className="inventory-mini-card__list inventory-mini-card__list--compact">
+                      <div className="inventory-top-row">
+                        <div className="inventory-top-row__main">
+                          <strong>Cost Value</strong>
+                          <span>Based on current stock on hand</span>
+                        </div>
+                        <strong>{formatCurrency(valuationTotals.cost)}</strong>
+                      </div>
+                      <div className="inventory-top-row">
+                        <div className="inventory-top-row__main">
+                          <strong>Retail Value</strong>
+                          <span>Projected sell-through value</span>
+                        </div>
+                        <strong>{formatCurrency(valuationTotals.retail)}</strong>
+                      </div>
+                      <div className="inventory-top-row">
+                        <div className="inventory-top-row__main">
+                          <strong>Gross Margin Potential</strong>
+                          <span>Retail minus cost value</span>
+                        </div>
+                        <strong>{formatCurrency(valuationTotals.retail - valuationTotals.cost)}</strong>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="inventory-mini-card">
+                    <div className="inventory-mini-card__header">
+                      <span>Expiring Batches</span>
+                    </div>
+                    <div className="inventory-mini-card__list inventory-mini-card__list--compact">
+                      {expiringBatchItems.map((batch) => (
+                        <div key={batch.id} className="inventory-alert-row">
+                          <div>
+                            <strong>{batch.batch_number}</strong>
+                            <span>{batch.quantity_on_hand} on hand</span>
+                          </div>
+                          <div className="inventory-alert-row__meta">
+                            <span>{batch.expiry_date ? new Date(batch.expiry_date).toLocaleDateString("en-US") : "No expiry"}</span>
+                          </div>
+                        </div>
+                      ))}
+
+                      {!expiringBatchItems.length ? <div className="inventory-overview__empty">No expiring batch records for this branch</div> : null}
+                    </div>
+                  </section>
                 </div>
               </div>
 
@@ -1953,254 +2015,9 @@ export default function InventoryPage() {
               </aside>
             </div>
 
-            {selectedItem ? (
-              <div className="inventory-ops-grid">
-                <section className="inventory-mini-card">
-                  <div className="inventory-mini-card__header">
-                    <span>Stock Adjustment</span>
-                  </div>
-                  <div className="inventory-ops-card">
-                    <label className="inventory-field">
-                      <span>Mode</span>
-                      <select value={adjustmentMode} onChange={(event) => setAdjustmentMode(event.target.value as "delta" | "set")}>
-                        <option value="delta">Add or subtract quantity</option>
-                        <option value="set">Set exact quantity</option>
-                      </select>
-                    </label>
-                    <label className="inventory-field">
-                      <span>Adjustment Type</span>
-                      <select value={adjustmentReasonType} onChange={(event) => setAdjustmentReasonType(event.target.value as "adjustment" | "damage" | "return_out")}>
-                        <option value="adjustment">Manual adjustment</option>
-                        <option value="damage">Damaged stock</option>
-                        <option value="return_out">Returned out / supplier return</option>
-                      </select>
-                    </label>
-                    <label className="inventory-field">
-                      <span>{adjustmentMode === "set" ? "Target Quantity" : "Quantity Delta"}</span>
-                      <input type="number" step="1" value={adjustmentQuantity} onChange={(event) => setAdjustmentQuantity(event.target.value)} />
-                    </label>
-                    <label className="inventory-field">
-                      <span>Notes</span>
-                      <textarea value={adjustmentNotes} onChange={(event) => setAdjustmentNotes(event.target.value)} rows={3} />
-                    </label>
-                    <button type="button" className="inventory-action inventory-action--primary" onClick={() => void handleApplyAdjustment()} disabled={operationSaving}>
-                      <PackagePlus size={14} />
-                      <span>{operationSaving ? "Processing..." : "Post Adjustment"}</span>
-                    </button>
-                  </div>
-                </section>
-
-                <section className="inventory-mini-card">
-                  <div className="inventory-mini-card__header">
-                    <span>Branch Transfer</span>
-                  </div>
-                  <div className="inventory-ops-card">
-                    <label className="inventory-field">
-                      <span>From Branch</span>
-                      <input value={activeBranch?.name ?? ""} disabled />
-                    </label>
-                    <label className="inventory-field">
-                      <span>To Branch</span>
-                      <select value={effectiveTransferTargetBranchId} onChange={(event) => setTransferTargetBranchId(event.target.value)}>
-                        <option value="">Select branch</option>
-                        {branches.filter((branch) => branch.id !== selectedBranchId).map((branch) => (
-                          <option key={branch.id} value={branch.id}>
-                            {branch.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="inventory-field">
-                      <span>Quantity</span>
-                      <input type="number" min="1" step="1" value={transferQuantity} onChange={(event) => setTransferQuantity(event.target.value)} />
-                    </label>
-                    <label className="inventory-field">
-                      <span>Notes</span>
-                      <textarea value={transferNotes} onChange={(event) => setTransferNotes(event.target.value)} rows={3} />
-                    </label>
-                    <button type="button" className="inventory-action inventory-action--primary" onClick={() => void handleTransferStock()} disabled={operationSaving}>
-                      <ArrowRight size={14} />
-                      <span>{operationSaving ? "Processing..." : "Transfer Stock"}</span>
-                    </button>
-                  </div>
-                </section>
-
-                <section className="inventory-mini-card">
-                  <div className="inventory-mini-card__header">
-                    <span>Stock Count / Audit</span>
-                  </div>
-                  <div className="inventory-ops-card">
-                    <label className="inventory-field">
-                      <span>System Quantity</span>
-                      <input value={String(selectedItem.quantity)} disabled />
-                    </label>
-                    <label className="inventory-field">
-                      <span>Counted Quantity</span>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={effectiveCountedQuantity}
-                        onChange={(event) => {
-                          setCountTargetProductId(selectedItem.id);
-                          setCountedQuantity(event.target.value);
-                        }}
-                      />
-                    </label>
-                    <label className="inventory-field">
-                      <span>Variance</span>
-                      <input value={String(Number(effectiveCountedQuantity || 0) - selectedItem.quantity)} disabled />
-                    </label>
-                    <label className="inventory-field">
-                      <span>Audit Notes</span>
-                      <textarea value={countNotes} onChange={(event) => setCountNotes(event.target.value)} rows={3} />
-                    </label>
-                    <button type="button" className="inventory-action inventory-action--primary" onClick={() => void handlePostStockCount()} disabled={operationSaving}>
-                      <History size={14} />
-                      <span>{operationSaving ? "Processing..." : "Post Stock Count"}</span>
-                    </button>
-                  </div>
-                </section>
-              </div>
-            ) : null}
             </>
           )}
         </section>
-
-        <div className="inventory-bottom-grid">
-          <section className="inventory-mini-card">
-            <div className="inventory-mini-card__header">
-              <span>Inventory Valuation</span>
-            </div>
-            <div className="inventory-mini-card__list">
-              <div className="inventory-top-row">
-                <div className="inventory-top-row__main">
-                  <strong>Cost Value</strong>
-                  <span>Based on current stock on hand</span>
-                </div>
-                <strong>{formatCurrency(valuationTotals.cost)}</strong>
-              </div>
-              <div className="inventory-top-row">
-                <div className="inventory-top-row__main">
-                  <strong>Retail Value</strong>
-                  <span>Projected sell-through value</span>
-                </div>
-                <strong>{formatCurrency(valuationTotals.retail)}</strong>
-              </div>
-              <div className="inventory-top-row">
-                <div className="inventory-top-row__main">
-                  <strong>Gross Margin Potential</strong>
-                  <span>Retail minus cost value</span>
-                </div>
-                <strong>{formatCurrency(valuationTotals.retail - valuationTotals.cost)}</strong>
-              </div>
-            </div>
-          </section>
-
-          <section className="inventory-mini-card">
-            <div className="inventory-mini-card__header">
-              <span>Stock Overview by Category</span>
-            </div>
-            <div className="inventory-overview">
-              <div className="inventory-overview__chart">
-                {hasMounted && stockOverview.length ? (
-                  <ResponsiveContainer width="100%" height={180}>
-                    <PieChart>
-                      <Pie
-                        data={stockOverview}
-                        dataKey="value"
-                        nameKey="name"
-                        innerRadius={42}
-                        outerRadius={74}
-                        paddingAngle={2}
-                      >
-                        {stockOverview.map((entry, index) => (
-                          <Cell key={entry.name} fill={pieColors[index % pieColors.length]} />
-                        ))}
-                      </Pie>
-                    </PieChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="inventory-overview__empty">No category stock data yet</div>
-                )}
-              </div>
-
-              <div className="inventory-overview__legend">
-                {stockOverview.map((entry, index) => (
-                  <div key={entry.name} className="inventory-overview__legend-row">
-                    <span className="inventory-overview__legend-group">
-                      <span className="inventory-overview__legend-dot" style={{ backgroundColor: pieColors[index % pieColors.length] }} />
-                      <span>{entry.name}</span>
-                    </span>
-                    <strong>{numberFormatter.format(entry.value)}</strong>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          <section className="inventory-mini-card">
-            <div className="inventory-mini-card__header">
-              <span>Low Stock Alerts</span>
-            </div>
-            <div className="inventory-mini-card__list">
-              {lowStockItems.slice(0, 5).map((item) => (
-                <div key={item.id} className="inventory-alert-row">
-                  <div>
-                    <strong>{item.name}</strong>
-                    <span>{item.partNumber || item.sku}</span>
-                  </div>
-                  <div className="inventory-alert-row__meta">
-                    <span>Stock: {item.quantity}</span>
-                    <span>Reorder: {item.reorderLevel}</span>
-                  </div>
-                </div>
-              ))}
-
-              {!lowStockItems.length ? <div className="inventory-overview__empty">No low stock alerts for this branch</div> : null}
-            </div>
-          </section>
-
-          <section className="inventory-mini-card">
-            <div className="inventory-mini-card__header">
-              <span>Top Moving Items This Month</span>
-            </div>
-            <div className="inventory-mini-card__list">
-              {topMovingProducts.map(({ item, quantity }) => (
-                <div key={item.id} className="inventory-top-row">
-                  <div className="inventory-top-row__main">
-                    <strong>{item.name}</strong>
-                    <span>{item.brandName}</span>
-                  </div>
-                  <strong>{numberFormatter.format(quantity)} pcs</strong>
-                </div>
-              ))}
-
-              {!topMovingProducts.length ? <div className="inventory-overview__empty">No stock movement records yet</div> : null}
-            </div>
-          </section>
-
-          <section className="inventory-mini-card">
-            <div className="inventory-mini-card__header">
-              <span>Expiring Batches</span>
-            </div>
-            <div className="inventory-mini-card__list">
-              {expiringBatchItems.map((batch) => (
-                <div key={batch.id} className="inventory-alert-row">
-                  <div>
-                    <strong>{batch.batch_number}</strong>
-                    <span>{batch.quantity_on_hand} on hand</span>
-                  </div>
-                  <div className="inventory-alert-row__meta">
-                    <span>{batch.expiry_date ? new Date(batch.expiry_date).toLocaleDateString("en-US") : "No expiry"}</span>
-                  </div>
-                </div>
-              ))}
-
-              {!expiringBatchItems.length ? <div className="inventory-overview__empty">No expiring batch records for this branch</div> : null}
-            </div>
-          </section>
-        </div>
       </div>
 
       {dialogOpen ? (
@@ -2218,22 +2035,28 @@ export default function InventoryPage() {
               </button>
             </div>
 
-            <div className="inventory-modal__tabs">
-              {productTabs.map((tab) => (
+            <div className="inventory-modal__stepper" role="tablist" aria-label="Product steps">
+              {productSteps.map((step, index) => (
                 <button
-                  key={tab.id}
+                  key={step.id}
                   type="button"
-                  className={`inventory-modal__tab ${activeTab === tab.id ? "inventory-modal__tab--active" : ""}`}
-                  onClick={() => setActiveTab(tab.id)}
+                  role="tab"
+                  aria-selected={activeStep === step.id}
+                  className={`inventory-modal__step ${activeStep === step.id ? "inventory-modal__step--active" : ""}`}
+                  onClick={() => setActiveStep(step.id)}
                 >
-                  {tab.label}
+                  <span className="inventory-modal__step-index">{index + 1}</span>
+                  <span className="inventory-modal__step-copy">
+                    <strong>{step.label}</strong>
+                    <span>{step.subtitle}</span>
+                  </span>
                 </button>
               ))}
             </div>
 
             <form className="inventory-form" onSubmit={handleSaveProduct}>
               <div className="inventory-form__body">
-                {activeTab === "basic" ? (
+                {activeStep === "identity" ? (
                   <div className="inventory-form__grid">
                     <label className="inventory-field">
                       <span>Product Name</span>
@@ -2333,7 +2156,7 @@ export default function InventoryPage() {
                   </div>
                 ) : null}
 
-                {activeTab === "pricing" ? (
+                {activeStep === "pricingStock" ? (
                   <div className="inventory-form__grid">
                     <label className="inventory-field">
                       <span>Cost Price</span>
@@ -2354,7 +2177,7 @@ export default function InventoryPage() {
                   </div>
                 ) : null}
 
-                {activeTab === "stock" ? (
+                {activeStep === "pricingStock" ? (
                   <div className="inventory-form__grid">
                     <label className="inventory-field">
                       <span>Stock Quantity</span>
@@ -2379,7 +2202,7 @@ export default function InventoryPage() {
                   </div>
                 ) : null}
 
-                {activeTab === "variants" ? (
+                {activeStep === "variantsFitment" ? (
                   <div className="inventory-variants-tab">
                     <div className="inventory-variants-tab__header">
                       <div>
@@ -2450,7 +2273,7 @@ export default function InventoryPage() {
                   </div>
                 ) : null}
 
-                {activeTab === "compatibility" ? (
+                {activeStep === "variantsFitment" ? (
                   <div className="inventory-compatibility">
                     <div className="inventory-compatibility__summary">
                       <strong>{selectedFormModels.length} model(s) selected</strong>
@@ -2483,7 +2306,7 @@ export default function InventoryPage() {
                   </div>
                 ) : null}
 
-                {activeTab === "images" ? (
+                {activeStep === "mediaHistory" ? (
                   <div className="inventory-images-tab">
                     <div className="inventory-images-tab__preview">
                       {formState.imageUrl ? (
@@ -2516,7 +2339,7 @@ export default function InventoryPage() {
                   </div>
                 ) : null}
 
-                {activeTab === "history" ? (
+                {activeStep === "mediaHistory" ? (
                   <div className="inventory-history-tab">
                     {dialogMode === "create" ? (
                       <div className="inventory-overview__empty">History becomes available after the product is created.</div>
@@ -2569,11 +2392,203 @@ export default function InventoryPage() {
                   <button type="button" className="inventory-action inventory-action--light" onClick={closeDialog} disabled={saving || deleting}>
                     Cancel
                   </button>
-                  <button type="submit" className="inventory-action inventory-action--primary" disabled={saving || deleting}>
+                  {!isFirstStep ? (
+                    <button type="button" className="inventory-action inventory-action--light" onClick={goToPreviousStep} disabled={saving || deleting}>
+                      <ArrowLeft size={14} />
+                      <span>Back</span>
+                    </button>
+                  ) : null}
+                  <button
+                    type={isLastStep ? "submit" : "button"}
+                    className="inventory-action inventory-action--primary"
+                    onClick={isLastStep ? undefined : goToNextStep}
+                    disabled={saving || deleting}
+                  >
                     <PackagePlus size={14} />
-                    <span>{saving ? "Saving..." : dialogMode === "create" ? "Create Product" : "Save Changes"}</span>
+                    <span>
+                      {saving
+                        ? "Saving..."
+                        : isLastStep
+                          ? dialogMode === "create"
+                            ? "Create Product"
+                            : "Save Changes"
+                          : "Continue"}
+                    </span>
                   </button>
                 </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {quickActionOpen ? (
+        <div className="inventory-modal">
+          <div className="inventory-modal__backdrop" onClick={closeQuickAction} />
+          <div className="inventory-modal__panel inventory-modal__panel--quick">
+            <div className="inventory-modal__header">
+              <div>
+                <h2>
+                  {quickActionOpen === "adjust"
+                    ? "Stock Adjustment"
+                    : quickActionOpen === "transfer"
+                      ? "Branch Transfer"
+                      : "Stock Count / Audit"}
+                </h2>
+                <p>
+                  {quickActionOpen === "adjust"
+                    ? "Adjust the selected item quantity from the toolbar button."
+                    : quickActionOpen === "transfer"
+                      ? "Move stock between branches from the toolbar button."
+                      : "Record a physical count and compare it with the system quantity from the toolbar button."}
+                </p>
+              </div>
+
+              <button type="button" className="inventory-modal__close" onClick={closeQuickAction} aria-label="Close quick action">
+                <X size={16} />
+              </button>
+            </div>
+
+            <form className="inventory-quick-modal" onSubmit={submitQuickAction}>
+              <div className="inventory-quick-modal__summary">
+                <span>Selected item</span>
+                <strong>{quickActionItem?.name ?? "No item selected"}</strong>
+                <p>{quickActionItem?.sku ?? "-"}</p>
+              </div>
+
+              {quickActionOpen === "adjust" ? (
+                <div className="inventory-form__grid inventory-quick-modal__grid">
+                  <label className="inventory-field">
+                    <span>Current Stock</span>
+                    <input value={quickActionItem ? formatQuantity(quickActionItem.quantity, quickActionItem.unitType) : ""} disabled />
+                  </label>
+                  <label className="inventory-field">
+                    <span>Action Type</span>
+                    <select
+                      value={quickActionState.adjustMode}
+                      onChange={(event) => updateQuickActionField("adjustMode", event.target.value as "delta" | "set")}
+                    >
+                      <option value="delta">Quantity change</option>
+                      <option value="set">Set exact quantity</option>
+                    </select>
+                  </label>
+                  <label className="inventory-field">
+                    <span>Adjustment Reason</span>
+                    <select
+                      value={quickActionState.adjustReason}
+                      onChange={(event) => updateQuickActionField("adjustReason", event.target.value as QuickActionReason)}
+                    >
+                      <option value="adjustment">General adjustment</option>
+                      <option value="damage">Damaged stock</option>
+                      <option value="return_in">Returned stock</option>
+                      <option value="return_out">Returned to supplier</option>
+                    </select>
+                  </label>
+                  <label className="inventory-field">
+                    <span>{quickActionState.adjustMode === "set" ? "Target Quantity" : "Quantity Change"}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={quickActionState.adjustQuantity}
+                      onChange={(event) => updateQuickActionField("adjustQuantity", event.target.value)}
+                    />
+                  </label>
+                  <label className="inventory-field">
+                    <span>Notes</span>
+                    <input
+                      value={quickActionState.adjustNotes}
+                      onChange={(event) => updateQuickActionField("adjustNotes", event.target.value)}
+                      placeholder="Damage, correction, spoilage, etc."
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              {quickActionOpen === "transfer" ? (
+                <div className="inventory-form__grid inventory-quick-modal__grid">
+                  <label className="inventory-field">
+                    <span>From Branch</span>
+                    <input value={activeBranch?.name ?? ""} disabled />
+                  </label>
+                  <label className="inventory-field">
+                    <span>Target Branch</span>
+                    <select
+                      value={quickActionState.transferBranchId}
+                      onChange={(event) => updateQuickActionField("transferBranchId", event.target.value)}
+                    >
+                      <option value="">Select branch</option>
+                      {branches
+                        .filter((branch) => branch.id !== resolvedBranchId)
+                        .map((branch) => (
+                          <option key={branch.id} value={branch.id}>
+                            {branch.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label className="inventory-field">
+                    <span>Transfer Quantity</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={quickActionState.transferQuantity}
+                      onChange={(event) => updateQuickActionField("transferQuantity", event.target.value)}
+                    />
+                  </label>
+                  <label className="inventory-field">
+                    <span>Reference Note</span>
+                    <input
+                      value={quickActionState.transferNotes}
+                      onChange={(event) => updateQuickActionField("transferNotes", event.target.value)}
+                      placeholder="Transfer reference or remarks"
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              {quickActionOpen === "audit" ? (
+                <div className="inventory-form__grid inventory-quick-modal__grid">
+                  <label className="inventory-field">
+                    <span>System Quantity</span>
+                    <input value={quickActionItem ? formatQuantity(quickActionItem.quantity, quickActionItem.unitType) : ""} disabled />
+                  </label>
+                  <label className="inventory-field">
+                    <span>Last Counted Quantity</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={quickActionState.auditCountedQuantity}
+                      onChange={(event) => updateQuickActionField("auditCountedQuantity", event.target.value)}
+                    />
+                  </label>
+                  <label className="inventory-field">
+                    <span>Variance</span>
+                    <input
+                      value={quickActionItem ? formatSignedQuantity(parseNumber(quickActionState.auditCountedQuantity) - quickActionItem.quantity, quickActionItem.unitType) : "0"}
+                      disabled
+                    />
+                  </label>
+                  <label className="inventory-field">
+                    <span>Audit Notes</span>
+                    <input
+                      value={quickActionState.auditNotes}
+                      onChange={(event) => updateQuickActionField("auditNotes", event.target.value)}
+                      placeholder="Reason for the count / findings"
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              <div className="inventory-quick-modal__footer">
+                <button type="button" className="inventory-action inventory-action--light" onClick={closeQuickAction}>
+                  Close
+                </button>
+                <button type="submit" className="inventory-action inventory-action--primary" disabled={saving || !quickActionItem}>
+                  {saving ? "Saving..." : "Save Action"}
+                </button>
               </div>
             </form>
           </div>
@@ -2587,7 +2602,7 @@ export default function InventoryPage() {
           initialSelectedIds={selectedBarcodeIds}
           onClose={() => setBarcodeStudioOpen(false)}
           onSaved={async () => {
-            await refreshInventory(selectedBranchId);
+            await refreshInventory(resolvedBranchId);
           }}
         />
       ) : null}

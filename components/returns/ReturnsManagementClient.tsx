@@ -257,7 +257,9 @@ export default function ReturnsManagementClient() {
 
       const profile = profileResult.data as UserRow | null;
       const branchRows = (branchesResult.data ?? []) as BranchRow[];
+      const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
       const defaultBranch =
+        branchRows.find((branch) => branch.id === savedBranchId) ??
         branchRows.find((branch) => branch.id === profile?.branch_id) ??
         branchRows.find((branch) => branch.is_main) ??
         branchRows[0];
@@ -273,6 +275,23 @@ export default function ReturnsManagementClient() {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id) {
+        setSelectedBranchId(detail.id);
+      }
+    };
+
+    const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
+    if (savedBranchId) {
+      setSelectedBranchId((current) => current || savedBranchId);
+    }
+
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
   }, []);
 
   useEffect(() => {
@@ -662,16 +681,6 @@ export default function ReturnsManagementClient() {
           <p>Search by receipt or customer, route approvals, finalize refunds or exchanges, and track warranty claims from one desk.</p>
         </div>
 
-        <div className="returns-hero__branch">
-          <label>
-            <span>Branch</span>
-            <select value={selectedBranchId} onChange={(event) => setSelectedBranchId(event.target.value)}>
-              {branches.map((branch) => (
-                <option key={branch.id} value={branch.id}>{branch.name}</option>
-              ))}
-            </select>
-          </label>
-        </div>
       </section>
 
       <section className="returns-kpis">

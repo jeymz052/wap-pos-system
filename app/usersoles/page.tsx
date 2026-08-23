@@ -247,7 +247,6 @@ export default function UsersRolesPage() {
 
   return (
     <div className="ur-page">
-
       {/* ── RBAC Setup Banner (shown when db is empty) ─────────────────────── */}
       {roles.length === 0 && !loading && (
         <div className="ur-setup-banner">

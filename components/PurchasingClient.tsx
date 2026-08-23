@@ -33,6 +33,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { fetchBranchOptions } from "@/lib/branch-options";
 import { useRbac } from "@/components/RbacProvider";
 import { useSubscriptionAccess } from "@/components/SubscriptionProvider";
 import FeatureLockedPanel from "@/components/subscription/FeatureLockedPanel";
@@ -642,7 +643,6 @@ export default function PurchasingClient() {
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [profileUserId, setProfileUserId] = useState("");
   const [selectedBranchId, setSelectedBranchId] = useState("");
-  const [branches, setBranches] = useState<Branch[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [lowStock, setLowStock] = useState<LowStockRow[]>([]);
@@ -693,29 +693,30 @@ export default function PurchasingClient() {
       return;
     }
 
-    const [branchesResult, profileResult, suppliersResult, productsResult] = await Promise.all([
-      supabase.from("branches").select("id, name, is_main").eq("is_active", true).order("is_main", { ascending: false }),
+    const [profileResult, suppliersResult, productsResult] = await Promise.all([
       supabase.from("users").select("id, branch_id").eq("auth_id", user.id).maybeSingle(),
       supabase.from("suppliers").select("id, code, name, payment_terms, current_balance, is_active").eq("is_active", true).order("name"),
       supabase.from("products").select("id, name, sku, supplier_id, cost_price, reorder_level, critical_stock_level, status").eq("status", "active").order("name"),
     ]);
 
-    if (branchesResult.error || profileResult.error || suppliersResult.error || productsResult.error) {
+    if (profileResult.error || suppliersResult.error || productsResult.error) {
       setAlert({ type: "error", text: "Unable to load purchasing setup data from Supabase." });
       setLoading(false);
       return;
     }
 
-    const branchRows = (branchesResult.data ?? []) as Branch[];
     const profile = profileResult.data as UserProfile | null;
+    const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
+    const token = (await supabase.auth.getSession()).data.session?.access_token ?? "";
+    const branchRows = token ? ((await fetchBranchOptions(token)) as Branch[]) : [];
     const initialBranchId =
-      profile?.branch_id ??
-      branchRows.find((branch) => branch.is_main)?.id ??
-      branchRows[0]?.id ??
+      savedBranchId ||
+      profile?.branch_id ||
+      branchRows.find((branch) => branch.is_main)?.id ||
+      branchRows[0]?.id ||
       "";
 
     setProfileUserId(profile?.id ?? "");
-    setBranches(branchRows);
     setSuppliers((suppliersResult.data ?? []) as Supplier[]);
     setProducts((productsResult.data ?? []) as Product[]);
     setSelectedBranchId(initialBranchId);
@@ -791,6 +792,18 @@ export default function PurchasingClient() {
     };
     void run();
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id) {
+        setSelectedBranchId(detail.id);
+      }
+    };
+
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
   }, []);
 
   useEffect(() => {
@@ -1481,18 +1494,6 @@ export default function PurchasingClient() {
           <div className="purchasing-filters">
             <select
               className="purchasing-field-control"
-              value={selectedBranchId}
-              onChange={(event) => setSelectedBranchId(event.target.value)}
-            >
-              {branches.map((branch) => (
-                <option key={branch.id} value={branch.id}>
-                  {branch.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              className="purchasing-field-control"
               value={supplierFilterId}
               onChange={(event) => {
                 setSupplierFilterId(event.target.value);
@@ -1648,9 +1649,6 @@ export default function PurchasingClient() {
                 <ChevronRight size={14} />
               </button>
             </div>
-            <button type="button" className="purchasing-filter">
-              <span>{branches.find((branch) => branch.id === selectedBranchId)?.name ?? "Select Branch"}</span>
-            </button>
           </div>
 
           <div className="purchasing-bottom-grid">

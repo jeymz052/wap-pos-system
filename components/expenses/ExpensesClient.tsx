@@ -172,8 +172,9 @@ export default function ExpensesClient() {
   };
 
   useEffect(() => {
+    const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
     const timer = window.setTimeout(() => {
-      void loadSnapshot("");
+      void loadSnapshot(savedBranchId);
     }, 0);
 
     return () => {
@@ -181,6 +182,22 @@ export default function ExpensesClient() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      const nextBranchId = detail?.id ?? "";
+      if (nextBranchId) {
+        setSelectedBranchId(nextBranchId);
+        setForm((current) => ({ ...current, branchId: nextBranchId }));
+        void loadSnapshot(nextBranchId);
+      }
+    };
+
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBranchId]);
 
   const categoryMap = useMemo(
     () => new Map((snapshot?.categories ?? []).map((category) => [category.id, category])),
@@ -659,25 +676,6 @@ export default function ExpensesClient() {
         </div>
 
         <div className="expenses-hero__controls">
-          <label className="expenses-field">
-            <span>Branch</span>
-            <select
-              value={selectedBranchId}
-              onChange={(event) => {
-                const nextBranchId = event.target.value;
-                setSelectedBranchId(nextBranchId);
-                setForm((current) => ({ ...current, branchId: nextBranchId }));
-                void loadSnapshot(nextBranchId);
-              }}
-            >
-              {(snapshot?.branches ?? []).map((branch) => (
-                <option key={branch.id} value={branch.id}>
-                  {branch.name}
-                </option>
-              ))}
-            </select>
-          </label>
-
           <button
             type="button"
             className="expenses-button expenses-button--ghost"

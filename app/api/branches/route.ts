@@ -171,7 +171,6 @@ async function loadWorkspace(actor: ActorContext) {
     supabaseAdmin
       .from("products")
       .select("id, name, sku, selling_price")
-      .eq("is_active", true)
       .order("name", { ascending: true })
       .limit(250),
     usersQuery,

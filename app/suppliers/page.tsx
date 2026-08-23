@@ -8,11 +8,11 @@ import {
   CalendarDays,
   ChevronDown,
   CircleDollarSign,
+  EllipsisVertical,
   Eye,
   Filter,
   LoaderCircle,
   Mail,
-  MapPin,
   Package,
   PencilLine,
   Percent,
@@ -355,7 +355,6 @@ function downloadCsv(filename: string, rows: string[][]) {
 }
 
 export default function SuppliersPage() {
-  const [branches, setBranches] = useState<BranchRow[]>([]);
   const [selectedBranchId, setSelectedBranchId] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -400,6 +399,7 @@ export default function SuppliersPage() {
         return;
       }
 
+      const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
       const [profileResult, branchesResult] = await Promise.all([
         supabase.from("users").select("id, branch_id").eq("auth_id", authUser.id).maybeSingle(),
         supabase
@@ -415,11 +415,11 @@ export default function SuppliersPage() {
       const profile = (profileResult.data as UserRow | null) ?? null;
       const branchRows = (branchesResult.data ?? []) as BranchRow[];
       const defaultBranch =
+        branchRows.find((branch) => branch.id === savedBranchId) ??
         branchRows.find((branch) => branch.id === profile?.branch_id) ??
         branchRows.find((branch) => branch.is_main) ??
         branchRows[0];
 
-      setBranches(branchRows);
       setSelectedBranchId(defaultBranch?.id ?? "");
       setLoading(false);
     };
@@ -432,8 +432,18 @@ export default function SuppliersPage() {
   }, []);
 
   useEffect(() => {
-    if (!selectedBranchId) return;
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<BranchRow>).detail;
+      if (detail?.id) {
+        setSelectedBranchId(detail.id);
+      }
+    };
 
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
+  }, []);
+
+  useEffect(() => {
     let isMounted = true;
 
     const loadSupplierWorkspace = async () => {
@@ -441,41 +451,49 @@ export default function SuppliersPage() {
       setError("");
       setNotice("");
 
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token ?? "";
+
       const [suppliersResult, ordersResult, productsResult, stocksResult] = await Promise.all([
-        supabase
-          .from("suppliers")
-          .select(
-            "id, code, name, supplier_type, contact_person, phone, email, address, tax_number, payment_terms, credit_limit, current_balance, is_active, created_at"
-          )
-          .order("name", { ascending: true }),
-        supabase
-          .from("purchase_orders")
-          .select(
-            "id, po_number, supplier_id, branch_id, status, expected_date, received_date, supplier_invoice, invoice_image_url, total_amount, paid_amount, created_at"
-          )
-          .eq("branch_id", selectedBranchId)
-          .neq("status", "draft")
-          .neq("status", "cancelled")
-          .order("created_at", { ascending: false }),
+        fetch("/api/suppliers", {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        selectedBranchId
+          ? supabase
+              .from("purchase_orders")
+              .select(
+                "id, po_number, supplier_id, branch_id, status, expected_date, received_date, supplier_invoice, invoice_image_url, total_amount, paid_amount, created_at"
+              )
+              .eq("branch_id", selectedBranchId)
+              .neq("status", "draft")
+              .neq("status", "cancelled")
+              .order("created_at", { ascending: false })
+          : Promise.resolve({ data: [] as PurchaseOrderRow[], error: null }),
         supabase
           .from("products")
           .select("id, name, sku, supplier_id, cost_price, selling_price, reorder_level, status")
           .order("name", { ascending: true }),
-        supabase
-          .from("inventory_stocks")
-          .select("product_id, branch_id, quantity")
-          .eq("branch_id", selectedBranchId),
+        selectedBranchId
+          ? supabase
+              .from("inventory_stocks")
+              .select("product_id, branch_id, quantity")
+              .eq("branch_id", selectedBranchId)
+          : Promise.resolve({ data: [] as InventoryStockRow[], error: null }),
       ]);
 
       if (!isMounted) return;
 
-      if (suppliersResult.error || ordersResult.error || productsResult.error || stocksResult.error) {
+      const suppliersPayload = (await suppliersResult.json().catch(() => null)) as { suppliers?: SupplierRow[]; error?: string } | null;
+
+      if (!suppliersResult.ok || !suppliersPayload?.suppliers) {
         setError("Unable to load supplier records right now.");
         setLoading(false);
         return;
       }
 
-      const supplierRows = (suppliersResult.data ?? []) as SupplierRow[];
+      const supplierRows = (suppliersPayload.suppliers ?? []) as SupplierRow[];
       const orderRows = (ordersResult.data ?? []) as PurchaseOrderRow[];
       const productRows = (productsResult.data ?? []) as ProductRow[];
       const stockRows = (stocksResult.data ?? []) as InventoryStockRow[];
@@ -499,18 +517,17 @@ export default function SuppliersPage() {
 
       if (!isMounted) return;
 
-      if (paymentsResult.error || itemsResult.error) {
-        setError("Unable to load supplier transactions right now.");
-        setLoading(false);
-        return;
-      }
-
       setSuppliers(supplierRows);
       setPurchaseOrders(orderRows);
-      setPayments((paymentsResult.data ?? []) as SupplierPaymentRow[]);
       setProducts(productRows);
       setInventoryStocks(stockRows);
       setPurchaseOrderItems((itemsResult.data ?? []) as PurchaseOrderItemRow[]);
+
+      if (ordersResult.error || productsResult.error || stocksResult.error || paymentsResult.error || itemsResult.error) {
+        setNotice("Supplier list loaded, but some related records could not be fetched.");
+      }
+
+      setPayments((paymentsResult.data ?? []) as SupplierPaymentRow[]);
       setLoading(false);
     };
 
@@ -929,33 +946,35 @@ export default function SuppliersPage() {
       is_active: formState.is_active,
     };
 
-    const query =
-      modalMode === "create"
-        ? supabase
-            .from("suppliers")
-            .insert(payload)
-            .select(
-              "id, code, name, supplier_type, contact_person, phone, email, address, tax_number, payment_terms, credit_limit, current_balance, is_active, created_at"
-            )
-            .single()
-        : supabase
-            .from("suppliers")
-            .update(payload)
-            .eq("id", selectedSupplier?.id ?? "")
-            .select(
-              "id, code, name, supplier_type, contact_person, phone, email, address, tax_number, payment_terms, credit_limit, current_balance, is_active, created_at"
-            )
-            .single();
-
-    const result = await query;
-
-    if (result.error || !result.data) {
+    const session = await supabase.auth.getSession();
+    const token = session.data.session?.access_token ?? "";
+    if (!token) {
       setSaving(false);
-      setError(result.error?.message || "Unable to save supplier right now.");
+      setError("Your session expired. Please sign in again.");
       return;
     }
 
-    const supplier = result.data as SupplierRow;
+    const response = await fetch("/api/suppliers", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        ...payload,
+        id: modalMode === "edit" ? selectedSupplier?.id ?? "" : undefined,
+      }),
+    });
+
+    const result = (await response.json().catch(() => null)) as { supplier?: SupplierRow; error?: string } | null;
+
+    if (!response.ok || !result?.supplier) {
+      setSaving(false);
+      setError(result?.error || "Unable to save supplier right now.");
+      return;
+    }
+
+    const supplier = result.supplier as SupplierRow;
 
     setSuppliers((current) => {
       if (modalMode === "create") {
@@ -1028,24 +1047,11 @@ export default function SuppliersPage() {
 
       <section className="suppliers-topbar">
         <div className="suppliers-topbar__copy">
-          <span className="suppliers-topbar__eyebrow">Module 8</span>
-          <h1>Supplier Management</h1>
-          <p>Manage supplier profiles, payable exposure, invoices, linked products, and delivery performance from one workspace.</p>
+          <h1>Suppliers</h1>
+          <p>Manage your suppliers and payables.</p>
         </div>
 
         <div className="suppliers-topbar__actions">
-          <label className="suppliers-select suppliers-select--wide">
-            <select value={selectedBranchId} onChange={(event) => setSelectedBranchId(event.target.value)}>
-              {branches.map((branch) => (
-                <option key={branch.id} value={branch.id}>
-                  {branch.name}
-                  {branch.is_main ? " (Main)" : ""}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={14} />
-          </label>
-
           <button type="button" className="suppliers-button suppliers-button--outline" onClick={() => setRefreshKey((value) => value + 1)}>
             <RefreshCcw size={15} />
             <span>Refresh</span>
@@ -1085,7 +1091,7 @@ export default function SuppliersPage() {
                 <label className="suppliers-search">
                   <input
                     type="search"
-                    placeholder="Search supplier name, code, contact, phone, email, or tax number..."
+                    placeholder="Search supplier name, code, contact, phone, email, or tax..."
                     value={searchTerm}
                     onChange={(event) => {
                       setSearchTerm(event.target.value);
@@ -1141,11 +1147,10 @@ export default function SuppliersPage() {
                   <tr>
                     <th>Supplier Code</th>
                     <th>Supplier Name</th>
-                    <th>Contact Person</th>
-                    <th>Phone</th>
+                    <th>Contact No.</th>
+                    <th>Email</th>
                     <th>Supplier Type</th>
-                    <th>Products</th>
-                    <th>Payable Balance</th>
+                    <th>Current Balance</th>
                     <th>Status</th>
                     <th>Action</th>
                   </tr>
@@ -1153,14 +1158,14 @@ export default function SuppliersPage() {
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={9} className="suppliers-empty">
+                      <td colSpan={8} className="suppliers-empty">
                         <LoaderCircle size={16} className="suppliers-spin" />
                         <span>Loading suppliers...</span>
                       </td>
                     </tr>
                   ) : paginatedSuppliers.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="suppliers-empty">
+                      <td colSpan={8} className="suppliers-empty">
                         No supplier records match the selected filters.
                       </td>
                     </tr>
@@ -1175,10 +1180,9 @@ export default function SuppliersPage() {
                         <td>
                           <div className="suppliers-table__name">{supplier.name}</div>
                         </td>
-                        <td>{supplier.contact_person?.trim() || "-"}</td>
                         <td>{supplier.phone?.trim() || "-"}</td>
+                        <td>{supplier.email?.trim() || "-"}</td>
                         <td>{formatSupplierType(supplier.supplier_type)}</td>
-                        <td>{numberFormatter.format(supplier.productCount)}</td>
                         <td className="suppliers-table__balance">{formatCurrency(supplier.balanceValue)}</td>
                         <td>
                           <span className={`suppliers-status suppliers-status--${supplier.statusTone}`}>
@@ -1200,6 +1204,13 @@ export default function SuppliersPage() {
                               }}
                             >
                               <PencilLine size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`More actions for ${supplier.name}`}
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              <EllipsisVertical size={14} />
                             </button>
                           </div>
                         </td>
@@ -1241,428 +1252,96 @@ export default function SuppliersPage() {
             </div>
           </article>
 
-          <article className="suppliers-panel">
-            <div className="suppliers-panel__heading suppliers-panel__heading--workspace">
-              <div className="suppliers-panel__heading-copy">
-                <span className="suppliers-panel__eyebrow">Supplier Workspace</span>
-                <h3>{selectedSupplier ? selectedSupplier.name : "Select a supplier"}</h3>
+          <section className="suppliers-footer-grid">
+            <article className="suppliers-panel">
+              <div className="suppliers-panel__heading suppliers-panel__heading--with-action">
+                <h3>Supplier Types</h3>
               </div>
-
-              <div className="suppliers-detail-actions suppliers-detail-actions--compact">
-                <button
-                  type="button"
-                  className="suppliers-button suppliers-button--outline"
-                  onClick={openEditModal}
-                  disabled={!selectedSupplier}
-                >
-                  <PencilLine size={15} />
-                  <span>Edit Supplier</span>
-                </button>
-                <button
-                  type="button"
-                  className="suppliers-button suppliers-button--primary"
-                  onClick={exportSelectedSupplierStatement}
-                  disabled={!selectedSupplier}
-                >
-                  <ReceiptText size={15} />
-                  <span>Export Statement</span>
-                </button>
+              <div className="suppliers-chart-card">
+                <div className="suppliers-donut" style={{ background: supplierTypeChart }}>
+                  <div className="suppliers-donut__center">
+                    <span>Total Suppliers</span>
+                    <strong>{numberFormatter.format(totalSuppliers)}</strong>
+                  </div>
+                </div>
+                <div className="suppliers-chart-legend">
+                  {supplierTypeBreakdown.length === 0 ? (
+                    <div className="suppliers-empty suppliers-empty--stack">No supplier type data available.</div>
+                  ) : (
+                    supplierTypeBreakdown.map((item) => (
+                      <div key={item.label} className="suppliers-legend">
+                        <span className="suppliers-legend__dot" style={{ background: item.color }} />
+                        <div className="suppliers-legend__copy">
+                          <span>{item.label}</span>
+                          <strong>{item.count}</strong>
+                        </div>
+                        <span className="suppliers-legend__share">{item.percentage.toFixed(1)}%</span>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
-            </div>
+            </article>
 
-            {selectedSupplier ? (
-              <>
-                <div className="suppliers-tabs">
-                  {detailTabs.map((tab) => (
+            <article className="suppliers-panel">
+              <div className="suppliers-panel__heading suppliers-panel__heading--with-action">
+                <h3>Aging of Payables</h3>
+                <button type="button" className="suppliers-panel__link">View Report</button>
+              </div>
+              <div className="suppliers-aging">
+                {agingRows.map((row) => {
+                  const percentage = totalPayables > 0 ? (row.value / totalPayables) * 100 : 0;
+                  return (
+                    <div key={row.key} className="suppliers-aging__row">
+                      <div className="suppliers-aging__copy">
+                        <span>{row.label}</span>
+                        <strong>{formatCurrency(row.value)}</strong>
+                      </div>
+                      <div className="suppliers-aging__bar">
+                        <div
+                          className={`suppliers-aging__fill suppliers-aging__fill--${row.tone}`}
+                          style={{ width: `${Math.max(percentage, row.value > 0 ? 8 : 0)}%` }}
+                        />
+                      </div>
+                      <span className="suppliers-aging__share">{percentage.toFixed(1)}%</span>
+                    </div>
+                  );
+                })}
+                <div className="suppliers-aging__total" style={{ backgroundImage: buildAgingBar(agingTotals) }}>
+                  <span>Total Payables</span>
+                  <strong>{formatCurrency(totalPayables)}</strong>
+                </div>
+              </div>
+            </article>
+
+            <article className="suppliers-panel">
+              <div className="suppliers-panel__heading suppliers-panel__heading--with-action">
+                <h3>Top Suppliers (This Month)</h3>
+                <button type="button" className="suppliers-panel__link">View All</button>
+              </div>
+              <div className="suppliers-ranking">
+                {topSuppliers.length === 0 ? (
+                  <div className="suppliers-empty suppliers-empty--stack">No supplier balances available.</div>
+                ) : (
+                  topSuppliers.map((supplier, index) => (
                     <button
-                      key={tab.key}
+                      key={supplier.id}
                       type="button"
-                      className={detailTab === tab.key ? "suppliers-tabs__button suppliers-tabs__button--active" : "suppliers-tabs__button"}
-                      onClick={() => setDetailTab(tab.key)}
+                      className="suppliers-ranking__row"
+                      onClick={() => setSelectedSupplierId(supplier.id)}
                     >
-                      {tab.label}
+                      <span>
+                        {index + 1}. {supplier.name}
+                      </span>
+                      <strong>{formatCurrency(supplier.balance)}</strong>
+                      <span>{supplier.share.toFixed(1)}%</span>
                     </button>
-                  ))}
-                </div>
+                  ))
+                )}
+              </div>
+            </article>
+          </section>
 
-                <div className="suppliers-workspace">
-                  {detailTab === "overview" ? (
-                    <div className="suppliers-workspace__stack">
-                      <div className="suppliers-quick-grid">
-                        <article className="suppliers-quick-card">
-                          <span>Contact Person</span>
-                          <strong>{selectedSupplier.contact_person?.trim() || "No contact person"}</strong>
-                          <small>Primary purchasing contact</small>
-                        </article>
-                        <article className="suppliers-quick-card">
-                          <span>Payment Terms</span>
-                          <strong>{selectedSupplier.payment_terms ?? 0} days</strong>
-                          <small>Default supplier credit term</small>
-                        </article>
-                        <article className="suppliers-quick-card">
-                          <span>Invoices on File</span>
-                          <strong>{numberFormatter.format(selectedSupplier.invoiceCount)}</strong>
-                          <small>Matched to purchase orders</small>
-                        </article>
-                        <article className="suppliers-quick-card">
-                          <span>Available Credit</span>
-                          <strong>{formatCurrency(selectedSupplier.availableCreditValue)}</strong>
-                          <small>{formatCurrency(selectedSupplier.creditLimitValue)} limit</small>
-                        </article>
-                      </div>
-
-                      <div className="suppliers-info-grid">
-                        <article className="suppliers-subpanel">
-                          <div className="suppliers-subpanel__heading">
-                            <h4>Profile</h4>
-                          </div>
-                          <div className="suppliers-profile-list">
-                            <div className="suppliers-details__item">
-                              <Phone size={15} />
-                              <span>{selectedSupplier.phone?.trim() || "-"}</span>
-                            </div>
-                            <div className="suppliers-details__item">
-                              <Mail size={15} />
-                              <span>{selectedSupplier.email?.trim() || "-"}</span>
-                            </div>
-                            <div className="suppliers-details__item">
-                              <MapPin size={15} />
-                              <span>{selectedSupplier.address?.trim() || "-"}</span>
-                            </div>
-                            <div className="suppliers-details__item">
-                              <Building2 size={15} />
-                              <span>{selectedSupplier.tax_number?.trim() || "No tax / VAT number"}</span>
-                            </div>
-                            <div className="suppliers-details__item">
-                              <BadgeCheck size={15} />
-                              <span>{selectedSupplier.is_active ? "Active supplier" : "Inactive supplier"}</span>
-                            </div>
-                          </div>
-                        </article>
-
-                        <article className="suppliers-subpanel">
-                          <div className="suppliers-subpanel__heading">
-                            <h4>Recent Transactions</h4>
-                          </div>
-                          <div className="suppliers-activities">
-                            {selectedSupplierActivities.length === 0 ? (
-                              <div className="suppliers-empty suppliers-empty--stack">No transactions recorded yet.</div>
-                            ) : (
-                              selectedSupplierActivities.map((activity) => (
-                                <div key={activity.id} className="suppliers-activities__row">
-                                  <div className={`suppliers-activities__icon suppliers-activities__icon--${activity.tone}`}>
-                                    {activity.meta.includes("Payment") ? <Wallet size={14} /> : <Truck size={14} />}
-                                  </div>
-                                  <div className="suppliers-activities__copy">
-                                    <strong>{activity.label}</strong>
-                                    <span>{activity.meta}</span>
-                                    <small>{formatCompactDate(activity.date)}</small>
-                                  </div>
-                                  <strong className="suppliers-activities__amount">{formatCurrency(activity.amount)}</strong>
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        </article>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {detailTab === "products" ? (
-                    <div className="suppliers-workspace__stack">
-                      <div className="suppliers-inline-metrics">
-                        <div className="suppliers-inline-metrics__item">
-                          <span>Total Products</span>
-                          <strong>{numberFormatter.format(selectedSupplier.productCount)}</strong>
-                        </div>
-                        <div className="suppliers-inline-metrics__item">
-                          <span>Active Products</span>
-                          <strong>{numberFormatter.format(selectedSupplier.activeProductCount)}</strong>
-                        </div>
-                        <div className="suppliers-inline-metrics__item">
-                          <span>Branch Stock Value</span>
-                          <strong>
-                            {formatCurrency(
-                              selectedSupplierProducts.reduce(
-                                (sum, product) => sum + parseNumber(product.cost_price) * (stockMap.get(product.id) ?? 0),
-                                0
-                              )
-                            )}
-                          </strong>
-                        </div>
-                      </div>
-
-                      <div className="suppliers-mini-table-wrap">
-                        <table className="suppliers-mini-table">
-                          <thead>
-                            <tr>
-                              <th>SKU</th>
-                              <th>Product</th>
-                              <th>Status</th>
-                              <th>Cost</th>
-                              <th>Sell Price</th>
-                              <th>Branch Stock</th>
-                              <th>Reorder Level</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedSupplierProducts.length === 0 ? (
-                              <tr>
-                                <td colSpan={7} className="suppliers-empty suppliers-empty--stack">
-                                  No products are assigned to this supplier yet.
-                                </td>
-                              </tr>
-                            ) : (
-                              selectedSupplierProducts.map((product) => (
-                                <tr key={product.id}>
-                                  <td className="suppliers-table__code">{product.sku}</td>
-                                  <td>{product.name}</td>
-                                  <td>
-                                    <span className="suppliers-pill">{formatStatusLabel(product.status ?? "active")}</span>
-                                  </td>
-                                  <td>{formatCurrency(parseNumber(product.cost_price))}</td>
-                                  <td>{formatCurrency(parseNumber(product.selling_price))}</td>
-                                  <td>{numberFormatter.format(stockMap.get(product.id) ?? 0)}</td>
-                                  <td>{numberFormatter.format(product.reorder_level ?? 0)}</td>
-                                </tr>
-                              ))
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {detailTab === "history" ? (
-                    <div className="suppliers-workspace__stack">
-                      <div className="suppliers-inline-metrics">
-                        <div className="suppliers-inline-metrics__item">
-                          <span>Purchase Orders</span>
-                          <strong>{numberFormatter.format(selectedSupplier.purchaseOrderCount)}</strong>
-                        </div>
-                        <div className="suppliers-inline-metrics__item">
-                          <span>This Month</span>
-                          <strong>{formatCurrency(selectedSupplier.totalPurchasesThisMonth)}</strong>
-                        </div>
-                        <div className="suppliers-inline-metrics__item">
-                          <span>This Year</span>
-                          <strong>{formatCurrency(selectedSupplier.totalPurchasesThisYear)}</strong>
-                        </div>
-                      </div>
-
-                      <div className="suppliers-mini-table-wrap">
-                        <table className="suppliers-mini-table">
-                          <thead>
-                            <tr>
-                              <th>PO Number</th>
-                              <th>Created</th>
-                              <th>Expected</th>
-                              <th>Received</th>
-                              <th>Status</th>
-                              <th>Total</th>
-                              <th>Paid</th>
-                              <th>Balance</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedSupplierOrders.length === 0 ? (
-                              <tr>
-                                <td colSpan={8} className="suppliers-empty suppliers-empty--stack">
-                                  No purchase history recorded for this supplier in the selected branch.
-                                </td>
-                              </tr>
-                            ) : (
-                              selectedSupplierOrders.map((order) => {
-                                const balance = Math.max(parseNumber(order.total_amount) - parseNumber(order.paid_amount), 0);
-                                return (
-                                  <tr key={order.id}>
-                                    <td className="suppliers-table__code">{order.po_number}</td>
-                                    <td>{formatDate(order.created_at)}</td>
-                                    <td>{formatDate(order.expected_date)}</td>
-                                    <td>{formatDate(order.received_date)}</td>
-                                    <td>
-                                      <span className="suppliers-pill">{formatStatusLabel(order.status)}</span>
-                                    </td>
-                                    <td>{formatCurrency(parseNumber(order.total_amount))}</td>
-                                    <td>{formatCurrency(parseNumber(order.paid_amount))}</td>
-                                    <td>{formatCurrency(balance)}</td>
-                                  </tr>
-                                );
-                              })
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {detailTab === "invoices" ? (
-                    <div className="suppliers-workspace__stack">
-                      <div className="suppliers-inline-metrics">
-                        <div className="suppliers-inline-metrics__item">
-                          <span>Supplier Invoices</span>
-                          <strong>{numberFormatter.format(selectedSupplier.invoiceCount)}</strong>
-                        </div>
-                        <div className="suppliers-inline-metrics__item">
-                          <span>Total Paid</span>
-                          <strong>{formatCurrency(selectedSupplier.totalPaidValue)}</strong>
-                        </div>
-                        <div className="suppliers-inline-metrics__item">
-                          <span>Outstanding</span>
-                          <strong>{formatCurrency(selectedSupplier.balanceValue)}</strong>
-                        </div>
-                      </div>
-
-                      <div className="suppliers-mini-table-wrap">
-                        <table className="suppliers-mini-table">
-                          <thead>
-                            <tr>
-                              <th>Invoice / Bill</th>
-                              <th>PO Number</th>
-                              <th>Issued</th>
-                              <th>Status</th>
-                              <th>Total</th>
-                              <th>Paid</th>
-                              <th>Balance</th>
-                              <th>Attachment</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedSupplierOrders.length === 0 ? (
-                              <tr>
-                                <td colSpan={8} className="suppliers-empty suppliers-empty--stack">
-                                  No supplier invoices or bills available yet.
-                                </td>
-                              </tr>
-                            ) : (
-                              selectedSupplierOrders.map((order) => {
-                                const balance = Math.max(parseNumber(order.total_amount) - parseNumber(order.paid_amount), 0);
-                                return (
-                                  <tr key={order.id}>
-                                    <td className="suppliers-table__code">{order.supplier_invoice?.trim() || order.po_number}</td>
-                                    <td>{order.po_number}</td>
-                                    <td>{formatDate(order.created_at)}</td>
-                                    <td>
-                                      <span className="suppliers-pill">{formatStatusLabel(order.status)}</span>
-                                    </td>
-                                    <td>{formatCurrency(parseNumber(order.total_amount))}</td>
-                                    <td>{formatCurrency(parseNumber(order.paid_amount))}</td>
-                                    <td>{formatCurrency(balance)}</td>
-                                    <td>
-                                      {order.invoice_image_url ? (
-                                        <a className="suppliers-link" href={order.invoice_image_url} target="_blank" rel="noreferrer">
-                                          View
-                                        </a>
-                                      ) : (
-                                        "No file"
-                                      )}
-                                    </td>
-                                  </tr>
-                                );
-                              })
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {detailTab === "performance" ? (
-                    <div className="suppliers-workspace__stack">
-                      <div className="suppliers-kpi-grid">
-                        <article className="suppliers-kpi">
-                          <span>Performance Score</span>
-                          <strong>{selectedSupplier.performanceScore}</strong>
-                          <small>{selectedSupplier.performanceLabel}</small>
-                        </article>
-                        <article className="suppliers-kpi">
-                          <span>On-Time Delivery</span>
-                          <strong>{formatPercent(selectedSupplier.onTimeRate)}</strong>
-                          <small>Expected vs received date</small>
-                        </article>
-                        <article className="suppliers-kpi">
-                          <span>Fill Rate</span>
-                          <strong>{formatPercent(selectedSupplier.fillRate)}</strong>
-                          <small>Received quantity accuracy</small>
-                        </article>
-                        <article className="suppliers-kpi">
-                          <span>Average Lead Time</span>
-                          <strong>{selectedSupplier.averageLeadDays.toFixed(1)} days</strong>
-                          <small>PO creation to receiving</small>
-                        </article>
-                      </div>
-
-                      <div className="suppliers-info-grid">
-                        <article className="suppliers-subpanel">
-                          <div className="suppliers-subpanel__heading">
-                            <h4>Performance Summary</h4>
-                          </div>
-                          <div className="suppliers-progress-list">
-                            <div className="suppliers-progress">
-                              <div className="suppliers-progress__copy">
-                                <span>On-time delivery</span>
-                                <strong>{formatPercent(selectedSupplier.onTimeRate)}</strong>
-                              </div>
-                              <div className="suppliers-progress__bar">
-                                <div className="suppliers-progress__fill suppliers-progress__fill--blue" style={{ width: `${selectedSupplier.onTimeRate}%` }} />
-                              </div>
-                            </div>
-                            <div className="suppliers-progress">
-                              <div className="suppliers-progress__copy">
-                                <span>Fill rate</span>
-                                <strong>{formatPercent(selectedSupplier.fillRate)}</strong>
-                              </div>
-                              <div className="suppliers-progress__bar">
-                                <div className="suppliers-progress__fill suppliers-progress__fill--green" style={{ width: `${selectedSupplier.fillRate}%` }} />
-                              </div>
-                            </div>
-                            <div className="suppliers-progress">
-                              <div className="suppliers-progress__copy">
-                                <span>Payment completion</span>
-                                <strong>{formatPercent(selectedSupplier.paymentCompletionRate)}</strong>
-                              </div>
-                              <div className="suppliers-progress__bar">
-                                <div
-                                  className="suppliers-progress__fill suppliers-progress__fill--amber"
-                                  style={{ width: `${Math.min(selectedSupplier.paymentCompletionRate, 100)}%` }}
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        </article>
-
-                        <article className="suppliers-subpanel">
-                          <div className="suppliers-subpanel__heading">
-                            <h4>Top Ordered Products</h4>
-                          </div>
-                          <div className="suppliers-meta-list">
-                            {selectedSupplierTopProducts.length === 0 ? (
-                              <div className="suppliers-empty suppliers-empty--stack">No product demand data available yet.</div>
-                            ) : (
-                              selectedSupplierTopProducts.map((product) => (
-                                <div key={product.productId} className="suppliers-meta-list__row">
-                                  <div>
-                                    <strong>{product.name}</strong>
-                                    <span>{product.sku}</span>
-                                  </div>
-                                  <div>
-                                    <strong>{numberFormatter.format(product.orderedQty)} ordered</strong>
-                                    <span>{numberFormatter.format(product.receivedQty)} received</span>
-                                  </div>
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        </article>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              </>
-            ) : (
-              <div className="suppliers-empty suppliers-empty--stack">Select a supplier to view details.</div>
-            )}
-          </article>
         </div>
 
         <aside className="suppliers-layout__side">
@@ -1738,129 +1417,61 @@ export default function SuppliersPage() {
                     <strong>{selectedSupplier.tax_number?.trim() || "-"}</strong>
                   </div>
                 </div>
+
+                <div className="suppliers-details__transactions">
+                  <div className="suppliers-panel__heading suppliers-panel__heading--sub">
+                    <h3>Recent Transactions</h3>
+                    <button type="button" className="suppliers-panel__link">View All</button>
+                  </div>
+
+                  <div className="suppliers-activities suppliers-activities--compact">
+                    {selectedSupplierActivities.length === 0 ? (
+                      <div className="suppliers-empty suppliers-empty--stack">No transactions recorded yet.</div>
+                    ) : (
+                      selectedSupplierActivities.slice(0, 4).map((activity) => (
+                        <div key={activity.id} className="suppliers-activities__row">
+                          <div className={`suppliers-activities__icon suppliers-activities__icon--${activity.tone}`}>
+                            {activity.meta.includes("Payment") ? <Wallet size={14} /> : <Truck size={14} />}
+                          </div>
+                          <div className="suppliers-activities__copy">
+                            <strong>{activity.label}</strong>
+                            <span>{activity.meta}</span>
+                            <small>{formatCompactDate(activity.date)}</small>
+                          </div>
+                          <strong className="suppliers-activities__amount">{formatCurrency(activity.amount)}</strong>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="suppliers-detail-actions">
+                  <button
+                    type="button"
+                    className="suppliers-button suppliers-button--outline"
+                    onClick={openEditModal}
+                    disabled={!selectedSupplier}
+                  >
+                    <PencilLine size={15} />
+                    <span>Edit Supplier</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="suppliers-button suppliers-button--primary"
+                    onClick={exportSelectedSupplierStatement}
+                    disabled={!selectedSupplier}
+                  >
+                    <ReceiptText size={15} />
+                    <span>Supplier Statement</span>
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="suppliers-empty suppliers-empty--stack">Select a supplier to view details.</div>
             )}
           </article>
 
-          <div className="suppliers-bottom-grid">
-            <article className="suppliers-panel">
-              <div className="suppliers-panel__heading">
-                <h3>Supplier Types</h3>
-              </div>
-
-              <div className="suppliers-chart-card">
-                <div className="suppliers-donut" style={{ background: supplierTypeChart }}>
-                  <div className="suppliers-donut__center">
-                    <span>Total Suppliers</span>
-                    <strong>{numberFormatter.format(totalSuppliers)}</strong>
-                  </div>
-                </div>
-
-                <div className="suppliers-chart-legend">
-                  {supplierTypeBreakdown.length === 0 ? (
-                    <div className="suppliers-empty suppliers-empty--stack">No supplier type data available.</div>
-                  ) : (
-                    supplierTypeBreakdown.map((item) => (
-                      <div key={item.label} className="suppliers-legend">
-                        <span className="suppliers-legend__dot" style={{ background: item.color }} />
-                        <div className="suppliers-legend__copy">
-                          <span>{item.label}</span>
-                          <strong>{item.count}</strong>
-                        </div>
-                        <span className="suppliers-legend__share">{item.percentage.toFixed(1)}%</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </article>
-
-            <article className="suppliers-panel">
-              <div className="suppliers-panel__heading">
-                <h3>Aging of Payables</h3>
-              </div>
-
-              <div className="suppliers-aging">
-                {agingRows.map((row) => {
-                  const percentage = totalPayables > 0 ? (row.value / totalPayables) * 100 : 0;
-                  return (
-                    <div key={row.key} className="suppliers-aging__row">
-                      <div className="suppliers-aging__copy">
-                        <span>{row.label}</span>
-                        <strong>{formatCurrency(row.value)}</strong>
-                      </div>
-                      <div className="suppliers-aging__bar">
-                        <div
-                          className={`suppliers-aging__fill suppliers-aging__fill--${row.tone}`}
-                          style={{ width: `${Math.max(percentage, row.value > 0 ? 8 : 0)}%` }}
-                        />
-                      </div>
-                      <span className="suppliers-aging__share">{percentage.toFixed(1)}%</span>
-                    </div>
-                  );
-                })}
-
-                <div className="suppliers-aging__total" style={{ backgroundImage: buildAgingBar(agingTotals) }}>
-                  <span>Total Payables</span>
-                  <strong>{formatCurrency(totalPayables)}</strong>
-                </div>
-              </div>
-            </article>
-
-            <article className="suppliers-panel">
-              <div className="suppliers-panel__heading">
-                <h3>Top Suppliers by Balance</h3>
-              </div>
-
-              <div className="suppliers-ranking">
-                {topSuppliers.length === 0 ? (
-                  <div className="suppliers-empty suppliers-empty--stack">No supplier balances available.</div>
-                ) : (
-                  topSuppliers.map((supplier, index) => (
-                    <button
-                      key={supplier.id}
-                      type="button"
-                      className="suppliers-ranking__row"
-                      onClick={() => setSelectedSupplierId(supplier.id)}
-                    >
-                      <span>
-                        {index + 1}. {supplier.name}
-                      </span>
-                      <strong>{formatCurrency(supplier.balance)}</strong>
-                      <span>{supplier.share.toFixed(1)}%</span>
-                    </button>
-                  ))
-                )}
-              </div>
-            </article>
-          </div>
         </aside>
-      </section>
-
-      <section className="suppliers-footer-banner">
-        <div className="suppliers-footer-banner__copy">
-          <div className="suppliers-footer-banner__icon">
-            <CircleDollarSign size={18} />
-          </div>
-          <div>
-            <strong>Supplier management is now tied to purchasing, invoices, product assignments, and live payable exposure.</strong>
-            <p>Use the workspace tabs to review catalog coverage, invoice history, and delivery performance before placing your next order.</p>
-          </div>
-        </div>
-
-        <button
-          type="button"
-          className="suppliers-button suppliers-button--outline"
-          onClick={() => {
-            setDetailTab("performance");
-            if (!selectedSupplierId && filteredSuppliers[0]) setSelectedSupplierId(filteredSuppliers[0].id);
-          }}
-        >
-          <ArrowUpRight size={15} />
-          Performance View
-        </button>
       </section>
 
       {modalMode ? (

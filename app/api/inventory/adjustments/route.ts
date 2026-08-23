@@ -8,7 +8,7 @@ type AdjustmentBody = {
   branchId?: string;
   quantity?: number;
   mode?: "delta" | "set";
-  reasonType?: "adjustment" | "damage" | "return_out";
+  reasonType?: "adjustment" | "damage" | "return_in" | "return_out";
   notes?: string;
 };
 
@@ -76,7 +76,14 @@ export async function POST(request: NextRequest) {
     await applyInventoryMovement({
       productId,
       branchId,
-      movementType: reasonType === "damage" ? "damage" : reasonType === "return_out" ? "return_out" : "adjustment",
+      movementType:
+        reasonType === "damage"
+          ? "damage"
+          : reasonType === "return_in"
+            ? "return_in"
+            : reasonType === "return_out"
+              ? "return_out"
+              : "adjustment",
       quantityAfter,
       referenceType: "stock_adjustment",
       referenceId: adjustmentId,

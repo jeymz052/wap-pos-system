@@ -5,6 +5,8 @@ import {
   AlertTriangle,
   BadgeCheck,
   Boxes,
+  BadgePercent,
+  MessageCircle,
   FileCheck2,
   FileSpreadsheet,
   LoaderCircle,
@@ -13,7 +15,6 @@ import {
   Printer,
   RefreshCcw,
   ShoppingBag,
-  Sparkles,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import {
@@ -69,6 +70,8 @@ type QuotationRow = {
   total_amount?: number | string | null;
   notes?: string | null;
   converted_to_sale_id?: string | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
   sent_at?: string | null;
   converted_at?: string | null;
   created_at: string;
@@ -232,14 +235,16 @@ export default function SalesOrdersClient() {
 
       if (!isMounted) return;
       if (profileResult.error || branchesResult.error) {
-        setError(profileResult.error?.message || branchesResult.error?.message || "Unable to initialize module 11.");
+        setError(profileResult.error?.message || branchesResult.error?.message || "Unable to initialize quotes and orders.");
         setLoading(false);
         return;
       }
 
       const profile = (profileResult.data as UserRow | null) ?? null;
       const branchRows = (branchesResult.data ?? []) as BranchRow[];
+      const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
       const defaultBranch =
+        branchRows.find((branch) => branch.id === savedBranchId) ??
         branchRows.find((branch) => branch.id === profile?.branch_id) ??
         branchRows.find((branch) => branch.is_main) ??
         branchRows[0];
@@ -255,6 +260,23 @@ export default function SalesOrdersClient() {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const handleBranchChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id) {
+        setSelectedBranchId(detail.id);
+      }
+    };
+
+    const savedBranchId = typeof window !== "undefined" ? window.localStorage.getItem("active_branch_id") ?? "" : "";
+    if (savedBranchId) {
+      setSelectedBranchId((current) => current || savedBranchId);
+    }
+
+    window.addEventListener("branch-changed", handleBranchChanged);
+    return () => window.removeEventListener("branch-changed", handleBranchChanged);
   }, []);
 
   useEffect(() => {
@@ -283,7 +305,7 @@ export default function SalesOrdersClient() {
         supabase.from("products").select("id, name, sku, selling_price, wholesale_price").order("name"),
         supabase
           .from("quotations")
-          .select("id, quote_number, branch_id, customer_id, customer_name, customer_email, status, valid_until, subtotal, discount_amount, tax_amount, total_amount, notes, converted_to_sale_id, sent_at, converted_at, created_at")
+          .select("id, quote_number, branch_id, customer_id, customer_name, customer_email, status, valid_until, subtotal, discount_amount, tax_amount, total_amount, notes, converted_to_sale_id, approved_by, approved_at, sent_at, converted_at, created_at")
           .eq("branch_id", selectedBranchId)
           .order("created_at", { ascending: false }),
         supabase
@@ -322,7 +344,7 @@ export default function SalesOrdersClient() {
         emailLogsResult.error;
 
       if (workspaceError) {
-        setError(workspaceError.message || "Unable to load module 11 data.");
+        setError(workspaceError.message || "Unable to load quotes and orders data.");
         setLoading(false);
         return;
       }
@@ -449,6 +471,16 @@ export default function SalesOrdersClient() {
   const selectedQuotationItems = selectedQuotation ? quotationItemsMap.get(selectedQuotation.id) ?? [] : [];
   const selectedSalesOrderItems = selectedSalesOrder ? salesOrderItemsMap.get(selectedSalesOrder.id) ?? [] : [];
   const selectedQuoteLogs = selectedQuotation ? emailLogs.filter((log) => log.quotation_id === selectedQuotation.id) : [];
+  const draftCustomerName = selectedCustomer?.name || "Walk-in / not assigned";
+  const draftValidityLabel =
+    documentType === "quotation"
+      ? `Valid until ${formatDate(validUntil)}`
+      : `Expected fulfillment ${formatDate(expectedFulfillmentDate)}`;
+  const draftApprovalLabel = documentType === "quotation"
+    ? "Draft quotation"
+    : reserveOnCreate
+      ? "Draft sales order, reserve stock on create"
+      : "Draft sales order";
 
   const draftStats = [
     {
@@ -461,7 +493,7 @@ export default function SalesOrdersClient() {
       label: "Wholesale / Custom Discount",
       value: formatCurrency(draftDiscountAmount),
       copy: "Savings applied by pricing rules",
-      icon: Sparkles,
+      icon: BadgePercent,
     },
     {
       label: "Quotations",
@@ -560,7 +592,7 @@ export default function SalesOrdersClient() {
     }
   }
 
-  async function runDocumentAction(action: "reserve_stock" | "release_stock" | "send_quotation_email" | "convert_quotation") {
+  async function runDocumentAction(action: "reserve_stock" | "release_stock" | "send_quotation_email" | "convert_quotation" | "approve_quotation") {
     setSaving(true);
     setError("");
     setNotice("");
@@ -585,6 +617,15 @@ export default function SalesOrdersClient() {
           quotationId: selectedQuotation.id,
           recipientEmail: emailRecipient.trim(),
           sentBy: currentUserId || null,
+        };
+      }
+
+      if (action === "approve_quotation") {
+        if (!selectedQuotation) throw new Error("Select a quotation first.");
+        body = {
+          action,
+          quotationId: selectedQuotation.id,
+          approverId: currentUserId || null,
         };
       }
 
@@ -616,6 +657,29 @@ export default function SalesOrdersClient() {
     } finally {
       setSaving(false);
     }
+  }
+
+  function openSelectedQuotationWhatsApp() {
+    if (!selectedQuotation) {
+      setError("Select a quotation first.");
+      return;
+    }
+
+    const customer = selectedQuotation.customer_id ? customerMap.get(selectedQuotation.customer_id) ?? null : null;
+    const phone = customer?.contact_number?.replace(/\D/g, "") ?? "";
+    if (!phone) {
+      setError("This quotation has no customer phone number for WhatsApp sharing.");
+      return;
+    }
+
+    const message = [
+      `Quotation ${selectedQuotation.quote_number}`,
+      `Customer: ${selectedQuotation.customer_name || customer?.name || "Walk-in Customer"}`,
+      `Total: ${formatCurrency(parseNumber(selectedQuotation.total_amount))}`,
+      `Valid until: ${formatDate(selectedQuotation.valid_until)}`,
+    ].join("\n");
+
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
   }
 
   function printSelectedQuotation() {
@@ -670,7 +734,7 @@ export default function SalesOrdersClient() {
     return (
       <div className="sales-orders-state-card">
         <LoaderCircle className="sales-orders-spin" size={18} />
-        <span>Loading module 11 workspace...</span>
+        <span>Loading quotes and orders workspace...</span>
       </div>
     );
   }
@@ -678,25 +742,19 @@ export default function SalesOrdersClient() {
   return (
     <div className="sales-orders-workspace">
       <section className="sales-orders-hero">
-        <div>
-          <span className="sales-orders-hero__eyebrow">Module 11</span>
-          <h1>Sales Orders, Quotations & Wholesale Pricing</h1>
-          <p>
-            Create quotations and sales orders, resolve wholesale and customer-specific pricing,
-            reserve stock, print documents, and send quotation emails through your Resend-backed setup.
-          </p>
+        <div className="sales-orders-hero__title-group">
+          <div className="sales-orders-hero__icon">
+            <Boxes size={20} />
+          </div>
+          <div>
+            <h1>Sales Orders, Quotations & Wholesale Pricing</h1>
+            <p>
+              Create quotations and sales orders, resolve wholesale and customer-specific pricing,
+              reserve stock, print documents, and send quotation emails through your Resend-backed setup.
+            </p>
+          </div>
         </div>
 
-        <label className="sales-orders-hero__branch">
-          <span>Branch</span>
-          <select value={selectedBranchId} onChange={(event) => setSelectedBranchId(event.target.value)}>
-            {branches.map((branch) => (
-              <option key={branch.id} value={branch.id}>
-                {branch.name}
-              </option>
-            ))}
-          </select>
-        </label>
       </section>
 
       <section className="sales-orders-kpis">
@@ -728,14 +786,29 @@ export default function SalesOrdersClient() {
           <div className="sales-orders-panel__head">
             <div>
               <h2>Compose Document</h2>
-              <p>Choose a customer, add parts, and the pricing engine will resolve the best rule.</p>
+              <p>POS-style builder with customer details, validity date, and approval state.</p>
             </div>
             <button type="button" className="sales-orders-button sales-orders-button--ghost" onClick={resetDraft}>
               <RefreshCcw size={15} /> Reset
             </button>
           </div>
 
-          <form className="sales-orders-form" onSubmit={createDocument}>
+          <div className="sales-orders-builder-summary">
+            <div>
+              <span>Customer</span>
+              <strong>{draftCustomerName}</strong>
+            </div>
+            <div>
+              <span>{documentType === "quotation" ? "Validity" : "Fulfillment"}</span>
+              <strong>{draftValidityLabel}</strong>
+            </div>
+            <div>
+              <span>Approval Status</span>
+              <strong>{draftApprovalLabel}</strong>
+            </div>
+          </div>
+
+          <form className="sales-orders-form sales-orders-form--pos-like" onSubmit={createDocument}>
             <div className="sales-orders-form__grid">
               <label>
                 <span>Document Type</span>
@@ -786,7 +859,7 @@ export default function SalesOrdersClient() {
                 </label>
               ) : (
                 <div className="sales-orders-pricing-hint">
-                  <Sparkles size={15} />
+                  <BadgePercent size={15} />
                   <span>
                     Pricing sources can be retail, wholesale, customer-specific, or bulk-tiered.
                   </span>
@@ -800,6 +873,12 @@ export default function SalesOrdersClient() {
             </label>
 
             <div className="sales-orders-lines">
+              <div className="sales-orders-line__head">
+                <span>Item</span>
+                <span>Qty</span>
+                <span>Unit Cost</span>
+                <span>Amount</span>
+              </div>
               {computedDraftLines.map((line) => (
                 <div key={line.id} className="sales-orders-line">
                   <div className="sales-orders-line__top">
@@ -832,7 +911,7 @@ export default function SalesOrdersClient() {
                     </label>
                   </div>
 
-                  <label>
+                  <label className="sales-orders-line__notes-field">
                     <span>Line Notes</span>
                     <input
                       value={line.notes}
@@ -1005,11 +1084,11 @@ export default function SalesOrdersClient() {
                     <span>{formatLabel(selectedQuotation.status)}</span>
                   </div>
 
-                  <div className="sales-orders-detail__meta">
-                    <div>
-                      <span>Total</span>
-                      <strong>{formatCurrency(parseNumber(selectedQuotation.total_amount))}</strong>
-                    </div>
+                    <div className="sales-orders-detail__meta">
+                      <div>
+                        <span>Total</span>
+                        <strong>{formatCurrency(parseNumber(selectedQuotation.total_amount))}</strong>
+                      </div>
                     <div>
                       <span>Discount</span>
                       <strong>{formatCurrency(parseNumber(selectedQuotation.discount_amount))}</strong>
@@ -1021,6 +1100,10 @@ export default function SalesOrdersClient() {
                     <div>
                       <span>Converted</span>
                       <strong>{selectedQuotation.converted_to_sale_id ? "Yes" : "No"}</strong>
+                    </div>
+                    <div>
+                      <span>Approval</span>
+                      <strong>{formatLabel(selectedQuotation.status)}</strong>
                     </div>
                   </div>
 
@@ -1048,6 +1131,14 @@ export default function SalesOrdersClient() {
                       <button type="button" className="sales-orders-button sales-orders-button--ghost" onClick={printSelectedQuotation}>
                         <Printer size={15} /> Print Quotation
                       </button>
+                      <button
+                        type="button"
+                        className="sales-orders-button sales-orders-button--ghost"
+                        disabled={saving || !selectedQuotation.customer_id}
+                        onClick={openSelectedQuotationWhatsApp}
+                      >
+                        <MessageCircle size={15} /> WhatsApp
+                      </button>
                     </div>
 
                     <label>
@@ -1061,6 +1152,15 @@ export default function SalesOrdersClient() {
                       onClick={() => void runDocumentAction("send_quotation_email")}
                     >
                       <Mail size={15} /> Send Quotation
+                    </button>
+
+                    <button
+                      type="button"
+                      className="sales-orders-button sales-orders-button--ghost"
+                      disabled={saving || selectedQuotation.status === "approved" || selectedQuotation.status === "converted"}
+                      onClick={() => void runDocumentAction("approve_quotation")}
+                    >
+                      <BadgeCheck size={15} /> Approve Quotation
                     </button>
 
                     <label>
@@ -1077,11 +1177,16 @@ export default function SalesOrdersClient() {
                     <button
                       type="button"
                       className="sales-orders-button sales-orders-button--primary"
-                      disabled={saving || selectedQuotation.status === "converted" || !canConvertQuotation}
+                      disabled={saving || selectedQuotation.status !== "approved" || !canConvertQuotation}
                       onClick={() => void runDocumentAction("convert_quotation")}
                     >
                       <Boxes size={15} /> Convert to Sale
                     </button>
+                    {selectedQuotation.status !== "approved" ? (
+                      <div className="sales-orders-actions-card__note">
+                        Approve the quotation first before converting it into a sale.
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="sales-orders-actions-card">

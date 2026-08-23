@@ -464,14 +464,14 @@ export default function CatalogCompatibilityClient() {
 
     const criticalError = [categoriesResult, brandsResult, productsResult].find((result) => result.error);
     if (criticalError?.error) {
-      setError(criticalError.error.message || "Unable to load Module 6 records.");
+      setError(criticalError.error.message || "Unable to load catalog records.");
       setLoading(false);
       return;
     }
 
     const nonCriticalErrors = [engineTypesResult, motorcycleModelsResult, productGroupsResult, compatibilityResult].filter((result) => result.error);
     if (nonCriticalErrors.length) {
-      setNotice({ tone: "error", message: "Some tables may not exist yet. Run the Module 6 migration in Supabase to enable all features." });
+      setNotice({ tone: "error", message: "Some tables may not exist yet. Run the catalog migration in Supabase to enable all features." });
     }
 
     setCategories(categoriesResult.data);
@@ -868,13 +868,17 @@ export default function CatalogCompatibilityClient() {
   return (
     <div className="catalog-page">
       <section className="catalog-hero">
-        <div>
-          <span className="catalog-kicker">Module 6</span>
-          <h1>Catalog, Brands & Compatibility</h1>
-          <p>
-            Manage product classification, brand masters, motorcycle fitment records, engine types, and product grouping
-            from one workspace.
-          </p>
+        <div className="catalog-hero__title-group">
+          <div className="catalog-hero__icon">
+            <Boxes size={20} />
+          </div>
+          <div>
+            <h1>Catalog, Brands & Compatibility</h1>
+            <p>
+              Manage product classification, brand masters, motorcycle fitment records, engine types, and product grouping
+              from one workspace.
+            </p>
+          </div>
         </div>
         <div className="catalog-hero__actions">
           <button type="button" className="catalog-button catalog-button--secondary" onClick={() => void loadCatalogModule()} disabled={loading || saving}>
@@ -948,7 +952,7 @@ export default function CatalogCompatibilityClient() {
       ) : null}
 
       <section className="catalog-toolbar">
-        <div className="catalog-tabs" role="tablist" aria-label="Module 6 areas">
+        <div className="catalog-tabs" role="tablist" aria-label="Catalog areas">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -976,7 +980,7 @@ export default function CatalogCompatibilityClient() {
       {loading ? (
         <div className="catalog-loading">
           <LoaderCircle size={18} className="catalog-spin" />
-          <span>Loading Module 6 data...</span>
+          <span>Loading catalog data...</span>
         </div>
       ) : null}
 
